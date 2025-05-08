@@ -179,6 +179,13 @@ BLACKLIST=( $(get_yaml_list_as_array '.blacklist[]') )
 GREMLIN_MODE=$(get_yaml_field '.gremlin_mode')
 COMMAND_TIMEOUT=$(get_yaml_field '.command_timeout // 10') # Default to 10 if not set
 
+# Read the first non-comment, non-empty line from RESPONSE_PATH_FILE
+RESPONSE_PATH=$(grep -vE '^\s*#|^\s*$' "$RESPONSE_PATH_FILE" | head -n 1 | tr -d '[:space:]')
+if [ -z "$RESPONSE_PATH" ]; then
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Error: No valid JQ path found in $RESPONSE_PATH_FILE. It must contain a non-comment, non-empty line with the JQ path (e.g., .response)." >&2
+    exit 1
+fi
+
 # --- Context Management ---
 PWD_HASH=$(echo -n "$PWD" | sha256sum | cut -d' ' -f1)
 
@@ -292,17 +299,38 @@ prepare_payload() {
 
 # --- Command Parsing ---
 parse_suggested_command() {
-    # Extracts the first bash command from a ```agent_command code block
+    # Extracts the first bash command from a ```agent_command code block within the input string
     echo "$1" | awk '/```agent_command/{flag=1; next} /```/{flag=0} flag' | head -n 1
+}
+
+parse_llm_thought() {
+    local input_str="$1"
+    # Check if <think> and </think> tags exist
+    if [[ "$input_str" == *"<think>"* && "$input_str" == *"</think>"* ]]; then
+        # Extract content between the first <think> and its corresponding </think>
+        local thought="${input_str#*<think>}" # Remove part before and including the first <think>
+        thought="${thought%%</think>*}"       # Remove part after and including the first </think>
+        # Trim leading/trailing whitespace and newlines
+        thought=$(echo "$thought" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        echo "$thought"
+    else
+        echo "" # No think block found or tags are mismatched
+    fi
 }
 
 # --- Task Handling ---
 handle_task() {
     local task_prompt="$1"
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [User]: Processing task: $task_prompt"
+    local timestamp_for_task
+    timestamp_for_task=$(date +'%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp_for_task] [User]: Processing task: $task_prompt"
 
     # Prepare payload
     PAYLOAD=$(prepare_payload "$task_prompt")
+    if [ $? -ne 0 ]; then # Check if prepare_payload indicated an error (e.g., invalid PAYLOAD_FILE)
+        # Error message already printed by prepare_payload
+        return 1
+    fi
 
     # Query LLM endpoint
     RESPONSE=$(curl -s -X POST "$ENDPOINT" \
@@ -310,69 +338,102 @@ handle_task() {
         -H "Content-Type: application/json" \
         -d "$PAYLOAD")
 
-    TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+    local llm_response_timestamp
+    llm_response_timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+
     if [[ -z "$RESPONSE" || "$RESPONSE" == "null" ]]; then
-        echo "[$TIMESTAMP] [LLM]: Error: No response from LLM endpoint."
+        echo "[$llm_response_timestamp] [LLM]: Error: No response or null response from LLM endpoint."
+        # Attempt to log context even with empty/null LLM response
+        append_context "$task_prompt" "{\"error\": \"No response or null response from LLM endpoint at $llm_response_timestamp\"}"
         return 1 # Indicate error
     fi
-    echo "[$TIMESTAMP] [LLM]: $RESPONSE"
 
-    SUGGESTED_CMD=$(parse_suggested_command "$RESPONSE")
+    LLM_MESSAGE_CONTENT=$(echo "$RESPONSE" | jq -r "$RESPONSE_PATH")
 
-    if [[ "$SUGGESTED_CMD" != "" ]]; then
+    if [ $? -ne 0 ] || [ "$LLM_MESSAGE_CONTENT" == "null" ] || [ -z "$LLM_MESSAGE_CONTENT" ]; then
+        echo "[$llm_response_timestamp] [LLM]: Error: Failed to extract message content from LLM response using JQ path '$RESPONSE_PATH'." >&2
+        echo "[$llm_response_timestamp] [LLM]: Raw Response was: $RESPONSE" # Print raw response for debugging this specific error
+        append_context "$task_prompt" "$RESPONSE" # Log the full raw response
+        return 1
+    fi
+
+    LLM_THOUGHT=$(parse_llm_thought "$LLM_MESSAGE_CONTENT")
+    if [ -n "$LLM_THOUGHT" ]; then
+        echo "$LLM_THOUGHT" | while IFS= read -r line; do
+            if [ -n "$line" ]; then # Avoid printing empty lines if thought parsing results in them
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Agent]: $line"
+            fi
+        done
+    fi
+
+    SUGGESTED_CMD=$(parse_suggested_command "$LLM_MESSAGE_CONTENT")
+
+    if [[ -n "$SUGGESTED_CMD" ]]; then
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Command]: $SUGGESTED_CMD"
+        
         local blacklisted_cmd=0
         # Check blacklist
         for bad in "${BLACKLIST[@]}"; do
             if [[ "$SUGGESTED_CMD" == *"$bad"* ]]; then
-                echo "[$TIMESTAMP] [System]: Command '$SUGGESTED_CMD' contains blacklisted term '$bad'. Aborting."
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Command '$SUGGESTED_CMD' contains blacklisted term '$bad'. Aborting."
                 blacklisted_cmd=1
                 break
             fi
         done
         if [ "$blacklisted_cmd" -eq 1 ]; then
-            append_context "$RESPONSE" # Still log the LLM interaction
-            return 1 # Indicate error
+            append_context "$task_prompt" "$RESPONSE"
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Agent]: Task aborted due to blacklist."
+            return 1 
         fi
 
         local whitelisted_cmd=0
-        # Check whitelist
-        for good in "${WHITELIST[@]}"; do
-            if [[ "$SUGGESTED_CMD" == *"$good"* ]]; then
-                whitelisted_cmd=1
-                break
-            fi
-        done
-        if ! $whitelisted_cmd && [ ${#WHITELIST[@]} -gt 0 ]; then # Only enforce whitelist if it's not empty
-            echo "[$TIMESTAMP] [System]: Command '$SUGGESTED_CMD' is not in whitelist. Aborting."
-            append_context "$RESPONSE" # Still log the LLM interaction
-            return 1 # Indicate error
-        fi
-        
-        # Gremlin mode: auto-execute or prompt
-        if [[ "$GREMLIN_MODE" == "true" ]]; then
-            echo "[$TIMESTAMP] [System]: Executing: $SUGGESTED_CMD (timeout: ${COMMAND_TIMEOUT}s)"
-            timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: $line"; done
-            CMD_STATUS=${PIPESTATUS[0]}
-            if [[ $CMD_STATUS -ne 0 ]]; then
-                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Command failed with exit code $CMD_STATUS."
+        if [ ${#WHITELIST[@]} -gt 0 ]; then # Only check whitelist if it has entries
+            for good in "${WHITELIST[@]}"; do
+                # Check if the command starts with a whitelisted term followed by a space or end of string
+                if [[ "$SUGGESTED_CMD" == "$good "* || "$SUGGESTED_CMD" == "$good" ]]; then
+                    whitelisted_cmd=1
+                    break
+                fi
+            done
+            if [ "$whitelisted_cmd" -eq 0 ]; then
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Command '$SUGGESTED_CMD' is not in whitelist or does not match expected format. Aborting."
+                append_context "$task_prompt" "$RESPONSE"
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Agent]: Task aborted due to whitelist."
+                return 1
             fi
         else
-            read -rp "Execute suggested command? '$SUGGESTED_CMD' [y/N]: " CONFIRM
+            whitelisted_cmd=1 # If whitelist is empty, all commands are allowed (subject to blacklist)
+        fi
+        
+        CMD_STATUS=0 # Initialize CMD_STATUS
+        if [[ "$GREMLIN_MODE" == "true" ]]; then
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Executing (Gremlin Mode): $SUGGESTED_CMD (timeout: ${COMMAND_TIMEOUT}s)"
+            timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: $line"; done
+            CMD_STATUS=${PIPESTATUS[0]}
+        else
+            local confirm_timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+            read -rp "[$confirm_timestamp] [User]: Execute suggested command? '$SUGGESTED_CMD' [y/N]: " CONFIRM
             if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-                echo "[$TIMESTAMP] [System]: Executing: $SUGGESTED_CMD (timeout: ${COMMAND_TIMEOUT}s)"
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Executing: $SUGGESTED_CMD (timeout: ${COMMAND_TIMEOUT}s)"
                 timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: $line"; done
                 CMD_STATUS=${PIPESTATUS[0]}
-                if [[ $CMD_STATUS -ne 0 ]]; then
-                    echo "[$(date +'%Y-%m-%d %H:%M:%S')] [System]: Command failed with exit code $CMD_STATUS."
-                fi
             else
-                echo "[$TIMESTAMP] [User]: Command execution cancelled."
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] [User]: Command execution cancelled."
+                CMD_STATUS=1 # Treat cancellation as a failure for task status
             fi
         fi
+
+        if [[ $CMD_STATUS -eq 0 ]]; then
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Agent]: Command executed successfully. Task complete."
+        else
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Agent]: Command failed or was cancelled. Exit code: $CMD_STATUS. Please review output."
+        fi
+    else
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Agent]: No command suggested by LLM."
     fi
 
-    append_context "$RESPONSE"
-    return 0 # Indicate success
+    append_context "$task_prompt" "$RESPONSE" # Log the original full LLM response
+    return $CMD_STATUS # Return command status, or 0 if no command, 1 if other error
 }
 
 # --- Main Loop ---
