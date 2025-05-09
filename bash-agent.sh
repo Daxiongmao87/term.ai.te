@@ -152,13 +152,13 @@ CONFIG_TEMPLATE="# config.yaml - REQUIRED - Configure this file for your environ
 #     ls: \"List directory contents.\"
 #     cat: \"Display file content.\"
 #     echo: \"Print text to the console.\"
-# gremlin_mode: If true, executes suggested commands without confirmation. DANGEROUS!
-# command_timeout: Timeout in seconds for executed commands (e.g., 10 for 10 seconds).
-# enable_dynamic_command_approval: If true, prompts the user for approval of non-whitelisted commands.
+operation_mode: normal # Options: normal, gremlin, goblin. Default: normal.
+#   normal: Whitelisted commands require confirmation. Non-whitelisted commands are rejected.
+#   gremlin: Whitelisted commands run without confirmation. Non-whitelisted commands prompt for approval (yes/no/add to whitelist).
+#   goblin: All commands run without confirmation. USE WITH EXTREME CAUTION!
+command_timeout: 30 # Default timeout for commands in seconds
 
 endpoint: \"http://localhost:11434/api/generate\" # Example for Ollama /api/generate
-# endpoint: \"http://localhost:11434/api/chat\" # Example for Ollama /api/chat
-# endpoint: \"https://api.openai.com/v1/chat/completions\" # Example for OpenAI
 
 # api_key: \"YOUR_API_KEY_HERE\" # Uncomment and replace if your LLM requires an API key
 
@@ -197,10 +197,8 @@ allowed_commands:
   echo: \"Print text. Example: echo 'Hello World'\"
   # Add more commands and their descriptions as needed.
 
-gremlin_mode: false # Set to true to execute commands without confirmation (DANGEROUS!)
-command_timeout: 30 # Default timeout for commands in seconds
-enable_dynamic_command_approval: false # Set to true to enable dynamic approval for non-whitelisted commands
-"
+operation_mode: normal # Default operation mode
+command_timeout: 30 # Default timeout for commands in seconds"
 
 PAYLOAD_TEMPLATE='{
   "model": "your-model-name:latest",
@@ -276,7 +274,7 @@ read_yq_value() {
 }
 
 # Validate required config fields are present (simple check, value check later)
-REQUIRED_CONFIG_FIELDS_EXISTENCE=(endpoint plan_prompt action_prompt evaluate_prompt allowed_commands gremlin_mode command_timeout enable_dynamic_command_approval)
+REQUIRED_CONFIG_FIELDS_EXISTENCE=(endpoint plan_prompt action_prompt evaluate_prompt allowed_commands operation_mode command_timeout)
 for field in "${REQUIRED_CONFIG_FIELDS_EXISTENCE[@]}"; do
     if ! cat "$CONFIG_FILE" | yq -e ".$field" >/dev/null 2>&1; then # -e makes yq exit non-zero if path not found
         log_message "Error" "Required configuration key '.$field' is missing in $CONFIG_FILE."
@@ -343,9 +341,9 @@ else
 fi
 rm -f "$yq_keys_stderr_file"
 
-GREMLIN_MODE=$(read_yq_value ".gremlin_mode" "// false")
-if [[ "$GREMLIN_MODE" != "true" && "$GREMLIN_MODE" != "false" ]]; then
-    log_message "Error" "GREMLIN_MODE in $CONFIG_FILE must be 'true' or 'false', got '$GREMLIN_MODE'."
+OPERATION_MODE=$(read_yq_value ".operation_mode" "// \"normal\"")
+if [[ "$OPERATION_MODE" != "normal" && "$OPERATION_MODE" != "gremlin" && "$OPERATION_MODE" != "goblin" ]]; then
+    log_message "Error" "OPERATION_MODE in $CONFIG_FILE must be 'normal', 'gremlin', or 'goblin', got '$OPERATION_MODE'."
     exit 1
 fi
 
@@ -354,14 +352,6 @@ if ! [[ "$COMMAND_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$COMMAND_TIMEOUT" -lt 0 ]; then 
     log_message "Error" "COMMAND_TIMEOUT ('$COMMAND_TIMEOUT') in $CONFIG_FILE must be a non-negative integer."
     exit 1
 fi
-
-ENABLE_DYNAMIC_COMMAND_APPROVAL=$(read_yq_value ".enable_dynamic_command_approval" "// false")
-if [[ "$ENABLE_DYNAMIC_COMMAND_APPROVAL" != "true" && "$ENABLE_DYNAMIC_COMMAND_APPROVAL" != "false" ]]; then
-    log_message "Error" "ENABLE_DYNAMIC_COMMAND_APPROVAL in $CONFIG_FILE must be 'true' or 'false', got '$ENABLE_DYNAMIC_COMMAND_APPROVAL'."
-    exit 1
-fi
-
-ENABLE_DYNAMIC_COMMAND_APPROVAL=$([[ "$ENABLE_DYNAMIC_COMMAND_APPROVAL" == "true" ]] && echo true || echo false)
 
 # Read the first non-comment, non-empty line from RESPONSE_PATH_FILE
 RESPONSE_PATH=$(grep -vE '^\s*#|^\s*$' "$RESPONSE_PATH_FILE" | head -n 1 | tr -d '[:space:]')
@@ -472,27 +462,32 @@ prepare_payload() {
             ;;
     esac
 
-    local allowed_commands_yaml_block
-    local yq_yaml_stderr_file
-    yq_yaml_stderr_file=$(mktemp)
-    # Get the .allowed_commands as a YAML block string
-    allowed_commands_yaml_block=$(cat "$CONFIG_FILE" | yq '.allowed_commands' 2> "$yq_yaml_stderr_file")
-    local yq_yaml_status=$?
-    
     local tool_instructions_addendum=""
-    if [ $yq_yaml_status -eq 0 ] && [ -n "$allowed_commands_yaml_block" ] && [ "$allowed_commands_yaml_block" != "null" ]; then
-        # This addendum is primarily for the "action" phase, but could be included in others if needed.
-        # The action_prompt specifically mentions that allowed_commands will be provided.
-        if [ "$phase" == "action" ]; then
-            tool_instructions_addendum="You are permitted to use the following commands. Their names and descriptions are provided below in YAML format. Adhere to these commands and their specified uses:\\n\\n\`\`\`yaml\\n${allowed_commands_yaml_block}\\n\`\`\`\\n\\n"
-        fi
-    else
-        log_message Warning "Could not fetch or format allowed_commands YAML block for LLM instructions."
-        if [ -s "$yq_yaml_stderr_file" ]; then
-            log_message Warning "yq stderr (allowed_commands YAML): $(cat "$yq_yaml_stderr_file")"
+
+    if [ "$phase" == "action" ]; then
+        if [[ "$OPERATION_MODE" == "normal" ]]; then
+            local allowed_commands_yaml_block
+            local yq_yaml_stderr_file
+            yq_yaml_stderr_file=$(mktemp)
+            # Get the .allowed_commands as a YAML block string
+            allowed_commands_yaml_block=$(cat "$CONFIG_FILE" | yq '.allowed_commands' 2> "$yq_yaml_stderr_file")
+            local yq_yaml_status=$?
+
+            if [ $yq_yaml_status -eq 0 ] && [ -n "$allowed_commands_yaml_block" ] && [ "$allowed_commands_yaml_block" != "null" ]; then
+                tool_instructions_addendum="You are permitted to use ONLY the following commands. Their names and descriptions are provided below in YAML format. Adhere strictly to these commands and their specified uses:\\n\\n\`\`\`yaml\\n${allowed_commands_yaml_block}\\n\`\`\`\\n\\nIf an appropriate command is not on this list, you should state that you cannot perform the action with the available commands and explain why.\\n"
+            else
+                log_message Warning "Could not fetch or format allowed_commands YAML block for LLM instructions in NORMAL mode. LLM will not have a command list."
+                if [ -s "$yq_yaml_stderr_file" ]; then
+                    log_message Warning "yq stderr (allowed_commands YAML): $(cat "$yq_yaml_stderr_file")"
+                fi
+                tool_instructions_addendum="You were supposed to be provided with a list of allowed commands for NORMAL mode, but it is currently unavailable or empty. If the task requires a command, you MUST state that you cannot perform the action without a valid command list and explain the situation. Do not attempt to use commands not explicitly provided to you.\\n"
+            fi
+            rm -f "$yq_yaml_stderr_file"
+        elif [[ "$OPERATION_MODE" == "gremlin" ]] || [[ "$OPERATION_MODE" == "goblin" ]]; then
+            tool_instructions_addendum="You are operating in $OPERATION_MODE mode. This mode allows you to suggest any standard Linux shell command you deem best for the current task step. You are NOT restricted to a predefined list. Choose the most appropriate and effective command to achieve the step's goal. Ensure the command is safe and directly relevant to the task.\\n\\n"
         fi
     fi
-    rm -f "$yq_yaml_stderr_file"
+    # For phases other than "action", or if no specific addendum was set, tool_instructions_addendum remains empty.
 
     # Prepend tool instructions to the specific system prompt for the phase
     local final_system_prompt_for_phase="${tool_instructions_addendum}${system_prompt_for_phase}"
@@ -563,19 +558,54 @@ parse_llm_decision() {
 # --- New Function: Get LLM Description and Add to Config ---
 get_llm_description_and_add_to_config() {
     local command_name="$1"
-    log_message System "Requesting LLM to describe command: $command_name"
+    log_message System "Attempting to get help output for command: $command_name"
 
-    local description_prompt_content="Describe the general purpose and typical usage of the Linux shell command '$command_name'. Provide a concise, one-sentence description suitable for a configuration file entry. Example for 'ls': 'List directory contents.'"
-    local system_prompt_for_description="You are a helpful assistant that provides concise descriptions of Linux commands."
+    local help_output=""
+    local help_exit_status=-1
+
+    # Try command --help
+    help_output=$(timeout "${COMMAND_TIMEOUT:-10}" "$command_name" --help 2>&1)
+    help_exit_status=$?
+    if [ $help_exit_status -ne 0 ] || [ -z "$help_output" ]; then
+        log_message Debug "Command '$command_name --help' failed (status: $help_exit_status) or produced no output. Trying '-h'."
+        help_output=$(timeout "${COMMAND_TIMEOUT:-10}" "$command_name" -h 2>&1)
+        help_exit_status=$?
+        if [ $help_exit_status -ne 0 ] || [ -z "$help_output" ]; then
+            log_message Warning "Could not get help output for '$command_name' using --help or -h. Will ask LLM for a general description."
+            help_output="" # Ensure help_output is empty if both failed
+        else
+            log_message Debug "Successfully got help output for '$command_name -h'."
+        fi
+    else
+        log_message Debug "Successfully got help output for '$command_name --help'."
+    fi
+
+    local max_help_length=1500
+    if [ ${#help_output} -gt $max_help_length ]; then
+        log_message Warning "Help output for '$command_name' is very long (${#help_output} chars). Truncating to $max_help_length chars for LLM prompt."
+        help_output="${help_output:0:$max_help_length}..."
+    fi
+
+    log_message System "Requesting LLM to describe command: $command_name"
+    local description_prompt_content=""
+    local system_prompt_for_description="You are an assistant that provides concise descriptions of Linux commands. Your response MUST be a valid JSON object containing a single key 'description' whose value is a short, one-sentence command description. Do NOT include any other text, explanations, or XML tags in your response. Output ONLY the JSON object."
+
+    if [ -n "$help_output" ]; then
+        description_prompt_content="Based on the following help output for the Linux shell command '$command_name', provide your response as a JSON object containing a single key \\\"description\\\" with a short, one-sentence string value describing the command's primary purpose. Output ONLY the JSON object.\\n\\nHelp Output:\\n\\\`\\\`\\\`\\n$help_output\\n\\\`\\\`\\\`\\n\\nJSON Output:"
+    else
+        description_prompt_content="Describe the general purpose and typical usage of the Linux shell command '$command_name'. Provide your response as a JSON object containing a single key \\\"description\\\" with a short, one-sentence string value. Do not include any other text or formatting outside the JSON object. Example for 'ls': {\\\"description\\\": \\\"List directory contents.\\\"}\\n\\nJSON Output:"
+    fi
 
     local DESCRIPTION_PAYLOAD
-    DESCRIPTION_PAYLOAD=$(jq -n --arg model "your-model-name:latest" \
-                              --arg sys_prompt "$system_prompt_for_description" \
-                              --arg user_prompt "$description_prompt_content" \
-                              '{model: $model, system: $sys_prompt, prompt: $user_prompt, stream: false}')
-
-    if [ -z "$DESCRIPTION_PAYLOAD" ]; then
-        log_message Error "Failed to create payload for command description for '$command_name'."
+    if ! jq -e . "$PAYLOAD_FILE" > /dev/null 2>&1; then
+        log_message "Error" "$PAYLOAD_FILE is not valid JSON. Please fix it manually."
+        return 1
+    fi
+    DESCRIPTION_PAYLOAD=$(jq --arg sys "$system_prompt_for_description" --arg user "$description_prompt_content" \
+        'walk(if type == "string" then gsub("<system_prompt>"; $sys) | gsub("<user_prompt>"; $user) else . end)' "$PAYLOAD_FILE")
+    local jq_payload_status=$?
+    if [ $jq_payload_status -ne 0 ] || [ -z "$DESCRIPTION_PAYLOAD" ]; then
+        log_message "Error" "Failed to create payload for command description for '$command_name'. JQ status: $jq_payload_status"
         return 1
     fi
 
@@ -588,49 +618,113 @@ get_llm_description_and_add_to_config() {
         log_message Error "No response from LLM when requesting description for '$command_name'."
         return 1
     fi
+    log_message Debug "LLM Raw Full Response for '$command_name': $LLM_DESC_RESPONSE"
 
-    log_message Debug "LLM Raw Description Response for '$command_name': $LLM_DESC_RESPONSE"
+    # Step 3: Extract the Relevant Field from LLM's JSON Response (using RESPONSE_PATH)
+    # This field might contain the target JSON object mixed with other text (like thoughts).
+    local LLM_RESPONSE_FIELD_CONTENT
+    LLM_RESPONSE_FIELD_CONTENT=$(printf "%s" "$LLM_DESC_RESPONSE" | jq -r "$RESPONSE_PATH")
+    local jq_extract_field_status=$?
+
+    if [ $jq_extract_field_status -ne 0 ] || [ -z "$LLM_RESPONSE_FIELD_CONTENT" ] || [ "$LLM_RESPONSE_FIELD_CONTENT" == "null" ]; then
+        log_message Error "Failed to extract LLM response field for '$command_name' using RESPONSE_PATH ('$RESPONSE_PATH')."
+        log_message Debug "Raw LLM Full Response was: $LLM_DESC_RESPONSE"
+        return 1
+    fi
+    log_message Debug "LLM Response Field Content for '$command_name' (pre-grep): [$LLM_RESPONSE_FIELD_CONTENT]"
+
+    # Step 4: Isolate the JSON Object using grep
+    # Process LLM_RESPONSE_FIELD_CONTENT to find and extract just the JSON object part.
+    local EXTRACTED_JSON_OBJECT
+    EXTRACTED_JSON_OBJECT=$(printf "%s" "$LLM_RESPONSE_FIELD_CONTENT" | grep -o -E '\{[^{}]*\}' | tail -n 1 | tr -d '\n')
+
+    if [ -z "$EXTRACTED_JSON_OBJECT" ]; then
+        log_message Error "Could not find/extract a JSON object like {...} from the LLM response field for '$command_name'."
+        log_message Debug "LLM Response Field Content that was searched: [$LLM_RESPONSE_FIELD_CONTENT]"
+        return 1
+    fi
+    log_message Debug "Isolated JSON Object for '$command_name' (post-grep): [$EXTRACTED_JSON_OBJECT]"
+
+    # Step 5: Extract the .description using jq
+    # Use jq -r ".description" on EXTRACTED_JSON_OBJECT.
     local COMMAND_DESCRIPTION
-    COMMAND_DESCRIPTION=$(printf "%s" "$LLM_DESC_RESPONSE" | jq -r "$RESPONSE_PATH")
+    COMMAND_DESCRIPTION=$(printf "%s" "$EXTRACTED_JSON_OBJECT" | jq -r ".description")
     local jq_desc_exit_status=$?
 
     if [ $jq_desc_exit_status -ne 0 ] || [ -z "$COMMAND_DESCRIPTION" ] || [ "$COMMAND_DESCRIPTION" == "null" ]; then
-        log_message Error "Failed to extract description for '$command_name' from LLM response. Raw: $LLM_DESC_RESPONSE"
+        log_message Error "Failed to extract '.description' from the isolated JSON object for '$command_name'."
+        log_message Debug "Isolated JSON object used for extraction: [$EXTRACTED_JSON_OBJECT]"
+        # Check if the extracted object was valid JSON at all
+        if ! printf "%s" "$EXTRACTED_JSON_OBJECT" | jq -e . > /dev/null 2>&1; then
+            log_message Error "The isolated JSON object was not valid JSON: [$EXTRACTED_JSON_OBJECT]"
+        fi
         return 1
     fi
 
-    COMMAND_DESCRIPTION=$(echo "$COMMAND_DESCRIPTION" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"/\\"/g') # Sanitize
+    # Step 6: Sanitize COMMAND_DESCRIPTION (Whitespace)
+    COMMAND_DESCRIPTION=$(printf "%s" "$COMMAND_DESCRIPTION" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-    if [ -z "$COMMAND_DESCRIPTION" ]; then
+    if [ -z "$COMMAND_DESCRIPTION" ]; then # Check after trimming
         log_message Error "Extracted command description for '$command_name' is empty after sanitization."
         return 1
     fi
-    
     log_message System "LLM suggested description for '$command_name': '$COMMAND_DESCRIPTION'"
 
-    local yq_add_stderr_file
-    yq_add_stderr_file=$(mktemp)
+    # Step 7: Sanitize COMMAND_DESCRIPTION (for yq embedding)
+    # Escape backslashes (\\ -> \\\\\\\\) and double quotes (\" -> \\\\\\") for shell + yq.
+    local sanitized_desc_for_yq_embed
+    sanitized_desc_for_yq_embed=$(printf "%s" "$COMMAND_DESCRIPTION" | sed -e 's/\\/\\\\\\\\/g' -e 's/"/\\\\"/g')
     
-    cat "$CONFIG_FILE" | yq ".allowed_commands += {\"$command_name\": \"$COMMAND_DESCRIPTION\"}" > "${CONFIG_FILE}.tmp" 2> "$yq_add_stderr_file"
-    local yq_add_status=$?
+    local temp_config_file
+    temp_config_file=$(mktemp)
+    if [ -z "$temp_config_file" ]; then log_message Error "mktemp failed for temp config"; return 1; fi
 
-    if [ $yq_add_status -ne 0 ]; then
-        log_message Error "yq failed to add command '$command_name' to $CONFIG_FILE. Exit status: $yq_add_status."
-        if [ -s "$yq_add_stderr_file" ]; then
-            log_message Error "yq stderr: $(cat "$yq_add_stderr_file")"
+    local yq_mod_stderr_file
+    yq_mod_stderr_file=$(mktemp)
+    if [ -z "$yq_mod_stderr_file" ]; then log_message Error "mktemp failed for yq mod stderr"; rm -f "$temp_config_file"; return 1; fi
+
+    # Step 8: Update config.yaml using yq
+    # Use the cat "$CONFIG_FILE" | yq "expression" - pattern.
+    echo "cat \"$CONFIG_FILE\" | yq \".allowed_commands.$command_name = \\\"$sanitized_desc_for_yq_embed\\\"\" - > \"$temp_config_file\" 2> \"$yq_mod_stderr_file\""
+    echo "$(cat "$CONFIG_FILE" | yq ".allowed_commands.$command_name = \"$sanitized_desc_for_yq_embed\"")" > "$temp_config_file" 2> "$yq_mod_stderr_file"
+    local yq_mod_status=$?
+
+    if [ $yq_mod_status -eq 0 ] && [ -s "$temp_config_file" ]; then
+        local yq_check_stderr_file
+        yq_check_stderr_file=$(mktemp)
+        if [ -z "$yq_check_stderr_file" ]; then log_message Error "mktemp failed for yq check stderr"; rm -f "$temp_config_file" "$yq_mod_stderr_file"; return 1; fi
+
+        if ! cat "$temp_config_file" | yq '.' > /dev/null 2> "$yq_check_stderr_file"; then
+            log_message Error "yq modification generated invalid YAML for command '$command_name' (validated with yq .). Config not updated."
+            if [ -s "$yq_check_stderr_file" ]; then log_message Error "yq validation stderr: $(cat "$yq_check_stderr_file")"; fi
+            if [ -s "$yq_mod_stderr_file" ]; then log_message Error "Original yq modification stderr: $(cat "$yq_mod_stderr_file")"; fi
+            log_message Debug "Problematic temp config content ($temp_config_file):\\n$(cat "$temp_config_file")"
+            #rm -f "$temp_config_file" "$yq_check_stderr_file" "$yq_mod_stderr_file"
+            return 1
         fi
-        rm -f "$yq_add_stderr_file" "${CONFIG_FILE}.tmp"
-        return 1
+        rm -f "$yq_check_stderr_file" "$yq_mod_stderr_file"
+
+        mv "$temp_config_file" "$CONFIG_FILE"
+        log_message System "Command '$command_name' with description '$COMMAND_DESCRIPTION' updated in $CONFIG_FILE using yq."
+        ALLOWED_COMMAND_CHECK_MAP["$command_name"]=1
+        return 0
     else
-        mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
-        log_message System "Command '$command_name' with description '$COMMAND_DESCRIPTION' added to $CONFIG_FILE."
+        log_message Error "yq failed to update $CONFIG_FILE for command '$command_name'. Exit status: $yq_mod_status. Config not updated."
+        if [ -s "$yq_mod_stderr_file" ]; then log_message Error "yq modification stderr: $(cat "$yq_mod_stderr_file")"; fi
+        if [ -f "$temp_config_file" ]; then
+            if [ -s "$temp_config_file" ]; then
+                 log_message Debug "Failed temp config content ($temp_config_file):\\n$(cat "$temp_config_file")"
+            else
+                 log_message Debug "yq produced an empty temp file ($temp_config_file)."
+            fi
+            rm -f "$temp_config_file"
+        fi
+        rm -f "$yq_mod_stderr_file"
+        return 1
     fi
-    rm -f "$yq_add_stderr_file"
-    return 0
 }
 
 # --- New Function: Prompt for Command Permission ---
-# Returns: 0 (allow), 1 (deny), 2 (cancel task)
 prompt_for_command_permission_and_update_config() {
     local cmd_to_check="$1"
 
@@ -651,7 +745,6 @@ prompt_for_command_permission_and_update_config() {
             log_message User "User chose to 'always' allow command '$cmd_to_check'. Attempting to add to config."
             if get_llm_description_and_add_to_config "$cmd_to_check"; then
                 log_message System "Command '$cmd_to_check' successfully added to allowed_commands and will be executed."
-                ALLOWED_COMMAND_CHECK_MAP["$cmd_to_check"]=1 # Update in-memory map for current session
                 return 0 # Allowed
             else
                 log_message Error "Failed to add command '$cmd_to_check' to config. It will not be executed."
@@ -787,13 +880,16 @@ handle_task() {
                 local base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
                 local execute_this_command=false
 
-                if [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] || -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]]; then
+                if [[ "$OPERATION_MODE" == "goblin" ]]; then # Goblin mode: always allow
+                    log_message "System" "Goblin Mode: Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is automatically allowed."
+                    execute_this_command=true
+                elif [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] || -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]]; then # Normal and Gremlin whitelisted
                     log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is allowed by existing config."
                     execute_this_command=true
-                else
+                else # Not whitelisted, applies to Normal (reject) and Gremlin (prompt)
                     log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is NOT in allowed commands."
-                    if [[ "$ENABLE_DYNAMIC_COMMAND_APPROVAL" == true ]]; then
-                        log_message "System" "Dynamic command approval is ENABLED. Requesting user permission for '$base_suggested_cmd'."
+                    if [[ "$OPERATION_MODE" == "gremlin" ]]; then # Gremlin: prompt for non-whitelisted
+                        log_message "System" "Gremlin Mode: Dynamic command approval. Requesting user permission for '$base_suggested_cmd'."
                         prompt_for_command_permission_and_update_config "$base_suggested_cmd"
                         local permission_status=$?
 
@@ -818,11 +914,11 @@ handle_task() {
                                 execute_this_command=false
                                 ;;
                         esac
-                    else
-                        log_message "System" "Dynamic command approval is DISABLED. Command '$base_suggested_cmd' will not be run as it's not in allowed_commands."
-                        CMD_OUTPUT="Command '$base_suggested_cmd' is not in allowed_commands and dynamic approval is disabled."
+                    else # Normal mode: reject non-whitelisted (Goblin and Gremlin already handled)
+                        log_message "System" "Normal Mode: Command '$base_suggested_cmd' not in allowed_commands. Rejected."
+                        CMD_OUTPUT="Command '$base_suggested_cmd' is not in allowed_commands and operation mode is 'normal'."
                         CMD_STATUS=1 # Indicate failure/denial
-                        LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied (not whitelisted, dynamic approval disabled)."
+                        LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied (not whitelisted, mode: normal)."
                         execute_this_command=false
                     fi
                 fi
@@ -830,12 +926,12 @@ handle_task() {
                 if [ "$execute_this_command" == "true" ]; then
                     LAST_ACTION_TAKEN="Executed command: $SUGGESTED_CMD"
                     log_message "Command" "$SUGGESTED_CMD"
-                    if [[ "$GREMLIN_MODE" == "true" ]]; then
-                        log_message "System" "Executing in Gremlin Mode: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
+                    if [[ "$OPERATION_MODE" == "goblin" || "$OPERATION_MODE" == "gremlin" ]]; then # Goblin and Gremlin: no confirmation for allowed/approved
+                        log_message "System" "Executing in $OPERATION_MODE Mode: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
                         CMD_OUTPUT=$(timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1)
                         CMD_STATUS=$? 
                         log_message "System" "Output:\\n$CMD_OUTPUT"
-                    else
+                    else # Normal mode: confirm whitelisted commands
                         printf "${CLR_GREEN}[%s] [User]:${CLR_RESET}${CLR_BOLD_GREEN} Execute suggested command? ${CLR_RESET}'${CLR_BOLD_YELLOW}%s${CLR_RESET}'${CLR_BOLD_GREEN} [y/N]: ${CLR_RESET}" "$(date +'%Y-%m-%d %H:%M:%S')" "$SUGGESTED_CMD"
                         read -r CONFIRM
                         if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
