@@ -137,7 +137,6 @@ declare LAST_ACTION_TAKEN=""
 declare LAST_ACTION_RESULT=""
 declare USER_CLARIFICATION_RESPONSE=""
 declare LAST_EVAL_DECISION_TYPE=""
-declare MAX_ITERATIONS=10 # Prevent infinite loops
 
 # --- Template Definitions ---
 CONFIG_TEMPLATE="# config.yaml - REQUIRED - Configure this file for your environment and LLM
@@ -689,9 +688,9 @@ handle_task() {
 
     log_message User "Starting task: $initial_user_prompt"
 
-    while [ "$current_iteration" -lt "$MAX_ITERATIONS" ] && [ "$task_status" == "IN_PROGRESS" ]; do
+    while [ "$task_status" == "IN_PROGRESS" ]; do # Loop until task status is no longer IN_PROGRESS
         current_iteration=$((current_iteration + 1))
-        log_message System "Iteration: $current_iteration/$MAX_ITERATIONS"
+        log_message System "Iteration: $current_iteration"
 
         # 1. PLAN PHASE (or re-plan)
         if [ -z "$CURRENT_PLAN_STR" ] || [[ "$LAST_EVAL_DECISION_TYPE" == "REVISE_PLAN" ]] || 
@@ -963,11 +962,6 @@ handle_task() {
         fi
 
     done # End of main while loop
-
-    if [ "$current_iteration" -ge "$MAX_ITERATIONS" ] && [ "$task_status" == "IN_PROGRESS" ]; then
-        log_message "Error" "Task exceeded maximum iterations ($MAX_ITERATIONS). Aborting."
-        task_status="TASK_FAILED"
-    fi
 
     if [ "$task_status" == "TASK_COMPLETE" ]; then
         log_message User "Task completed successfully."
