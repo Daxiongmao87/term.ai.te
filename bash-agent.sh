@@ -155,6 +155,7 @@ CONFIG_TEMPLATE="# config.yaml - REQUIRED - Configure this file for your environ
 #     echo: \"Print text to the console.\"
 # gremlin_mode: If true, executes suggested commands without confirmation. DANGEROUS!
 # command_timeout: Timeout in seconds for executed commands (e.g., 10 for 10 seconds).
+# enable_dynamic_command_approval: If true, prompts the user for approval of non-whitelisted commands.
 
 endpoint: \"http://localhost:11434/api/generate\" # Example for Ollama /api/generate
 # endpoint: \"http://localhost:11434/api/chat\" # Example for Ollama /api/chat
@@ -199,6 +200,7 @@ allowed_commands:
 
 gremlin_mode: false # Set to true to execute commands without confirmation (DANGEROUS!)
 command_timeout: 30 # Default timeout for commands in seconds
+enable_dynamic_command_approval: false # Set to true to enable dynamic approval for non-whitelisted commands
 "
 
 PAYLOAD_TEMPLATE='{
@@ -275,7 +277,7 @@ read_yq_value() {
 }
 
 # Validate required config fields are present (simple check, value check later)
-REQUIRED_CONFIG_FIELDS_EXISTENCE=(endpoint plan_prompt action_prompt evaluate_prompt allowed_commands gremlin_mode command_timeout)
+REQUIRED_CONFIG_FIELDS_EXISTENCE=(endpoint plan_prompt action_prompt evaluate_prompt allowed_commands gremlin_mode command_timeout enable_dynamic_command_approval)
 for field in "${REQUIRED_CONFIG_FIELDS_EXISTENCE[@]}"; do
     if ! cat "$CONFIG_FILE" | yq -e ".$field" >/dev/null 2>&1; then # -e makes yq exit non-zero if path not found
         log_message "Error" "Required configuration key '.$field' is missing in $CONFIG_FILE."
@@ -353,6 +355,14 @@ if ! [[ "$COMMAND_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$COMMAND_TIMEOUT" -lt 0 ]; then 
     log_message "Error" "COMMAND_TIMEOUT ('$COMMAND_TIMEOUT') in $CONFIG_FILE must be a non-negative integer."
     exit 1
 fi
+
+ENABLE_DYNAMIC_COMMAND_APPROVAL=$(read_yq_value ".enable_dynamic_command_approval" "// false")
+if [[ "$ENABLE_DYNAMIC_COMMAND_APPROVAL" != "true" && "$ENABLE_DYNAMIC_COMMAND_APPROVAL" != "false" ]]; then
+    log_message "Error" "ENABLE_DYNAMIC_COMMAND_APPROVAL in $CONFIG_FILE must be 'true' or 'false', got '$ENABLE_DYNAMIC_COMMAND_APPROVAL'."
+    exit 1
+fi
+
+ENABLE_DYNAMIC_COMMAND_APPROVAL=$([[ "$ENABLE_DYNAMIC_COMMAND_APPROVAL" == "true" ]] && echo true || echo false)
 
 # Read the first non-comment, non-empty line from RESPONSE_PATH_FILE
 RESPONSE_PATH=$(grep -vE '^\s*#|^\s*$' "$RESPONSE_PATH_FILE" | head -n 1 | tr -d '[:space:]')
@@ -540,7 +550,7 @@ parse_llm_plan() {
 parse_llm_decision() {
     local input_str="$1"
     # Extracts content from <decision>TAG: content</decision>
-    # Returns "TAG: content"
+    # Returns: "TAG: content"
     if [[ "$input_str" == *"<decision>"* && "$input_str" == *"</decision>"* ]]; then
         local decision_content="${input_str#*<decision>}"
         decision_content="${decision_content%%</decision>*}"
@@ -549,6 +559,115 @@ parse_llm_decision() {
     else
         echo "" # No decision block found
     fi
+}
+
+# --- New Function: Get LLM Description and Add to Config ---
+get_llm_description_and_add_to_config() {
+    local command_name="$1"
+    log_message System "Requesting LLM to describe command: $command_name"
+
+    local description_prompt_content="Describe the general purpose and typical usage of the Linux shell command '$command_name'. Provide a concise, one-sentence description suitable for a configuration file entry. Example for 'ls': 'List directory contents.'"
+    local system_prompt_for_description="You are a helpful assistant that provides concise descriptions of Linux commands."
+
+    local DESCRIPTION_PAYLOAD
+    DESCRIPTION_PAYLOAD=$(jq -n --arg model "your-model-name:latest" \
+                              --arg sys_prompt "$system_prompt_for_description" \
+                              --arg user_prompt "$description_prompt_content" \
+                              '{model: $model, system: $sys_prompt, prompt: $user_prompt, stream: false}')
+
+    if [ -z "$DESCRIPTION_PAYLOAD" ]; then
+        log_message Error "Failed to create payload for command description for '$command_name'."
+        return 1
+    fi
+
+    log_message Debug "Description Payload for '$command_name': $DESCRIPTION_PAYLOAD"
+
+    local LLM_DESC_RESPONSE
+    LLM_DESC_RESPONSE=$(curl -s -X POST "$ENDPOINT" -H "Content-Type: application/json" ${API_KEY:+-H "Authorization: Bearer $API_KEY"} -d "$DESCRIPTION_PAYLOAD")
+
+    if [ -z "$LLM_DESC_RESPONSE" ]; then
+        log_message Error "No response from LLM when requesting description for '$command_name'."
+        return 1
+    fi
+
+    log_message Debug "LLM Raw Description Response for '$command_name': $LLM_DESC_RESPONSE"
+    local COMMAND_DESCRIPTION
+    COMMAND_DESCRIPTION=$(printf "%s" "$LLM_DESC_RESPONSE" | jq -r "$RESPONSE_PATH")
+    local jq_desc_exit_status=$?
+
+    if [ $jq_desc_exit_status -ne 0 ] || [ -z "$COMMAND_DESCRIPTION" ] || [ "$COMMAND_DESCRIPTION" == "null" ]; then
+        log_message Error "Failed to extract description for '$command_name' from LLM response. Raw: $LLM_DESC_RESPONSE"
+        return 1
+    fi
+
+    COMMAND_DESCRIPTION=$(echo "$COMMAND_DESCRIPTION" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"/\\"/g') # Sanitize
+
+    if [ -z "$COMMAND_DESCRIPTION" ]; then
+        log_message Error "Extracted command description for '$command_name' is empty after sanitization."
+        return 1
+    fi
+    
+    log_message System "LLM suggested description for '$command_name': '$COMMAND_DESCRIPTION'"
+
+    local yq_add_stderr_file
+    yq_add_stderr_file=$(mktemp)
+    
+    cat "$CONFIG_FILE" | yq ".allowed_commands += {\"$command_name\": \"$COMMAND_DESCRIPTION\"}" > "${CONFIG_FILE}.tmp" 2> "$yq_add_stderr_file"
+    local yq_add_status=$?
+
+    if [ $yq_add_status -ne 0 ]; then
+        log_message Error "yq failed to add command '$command_name' to $CONFIG_FILE. Exit status: $yq_add_status."
+        if [ -s "$yq_add_stderr_file" ]; then
+            log_message Error "yq stderr: $(cat "$yq_add_stderr_file")"
+        fi
+        rm -f "$yq_add_stderr_file" "${CONFIG_FILE}.tmp"
+        return 1
+    else
+        mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+        log_message System "Command '$command_name' with description '$COMMAND_DESCRIPTION' added to $CONFIG_FILE."
+    fi
+    rm -f "$yq_add_stderr_file"
+    return 0
+}
+
+# --- New Function: Prompt for Command Permission ---
+# Returns: 0 (allow), 1 (deny), 2 (cancel task)
+prompt_for_command_permission_and_update_config() {
+    local cmd_to_check="$1"
+
+    printf "${CLR_YELLOW}The agent wants to use the command '%s', which is not in the allowed list.${CLR_RESET}\n" "$cmd_to_check"
+    printf "${CLR_YELLOW}Do you want to allow this? (y)es (this instance) / (n)o (deny this instance) / (a)lways (add to config & run) / (c)ancel task: ${CLR_RESET}"
+    read -r USER_DECISION
+
+    case "$USER_DECISION" in
+        [Yy])
+            log_message User "User allowed command '$cmd_to_check' for this instance."
+            return 0 # Allowed
+            ;;
+        [Nn])
+            log_message User "User denied command '$cmd_to_check' for this instance."
+            return 1 # Denied
+            ;;
+        [Aa])
+            log_message User "User chose to 'always' allow command '$cmd_to_check'. Attempting to add to config."
+            if get_llm_description_and_add_to_config "$cmd_to_check"; then
+                log_message System "Command '$cmd_to_check' successfully added to allowed_commands and will be executed."
+                ALLOWED_COMMAND_CHECK_MAP["$cmd_to_check"]=1 # Update in-memory map for current session
+                return 0 # Allowed
+            else
+                log_message Error "Failed to add command '$cmd_to_check' to config. It will not be executed."
+                return 1 # Denied due to failure in adding
+            fi
+            ;;
+        [Cc])
+            log_message User "User chose to cancel the task."
+            return 2 # Cancel task
+            ;;
+        *)
+            log_message User "Invalid choice. Assuming 'no'. Command '$cmd_to_check' will not be executed."
+            return 1 # Denied
+            ;;
+    esac
 }
 
 # --- Task Handling (Refactored for Plan-Act-Evaluate) ---
@@ -662,14 +781,55 @@ handle_task() {
         if [[ -n "$SUGGESTED_CMD" ]]; then
             if [[ "$SUGGESTED_CMD" == "report_task_completion" ]]; then
                 log_message "Eval Agent" "Received report_task_completion. Task will be marked as complete."
-                task_status="TASK_COMPLETE" # This will be handled by the main loop
+                task_status="TASK_COMPLETE"
                 LAST_ACTION_TAKEN="Internal command: report_task_completion"
                 LAST_ACTION_RESULT="Task marked as complete by Evaluator."
             else
-                LAST_ACTION_TAKEN="Executed command: $SUGGESTED_CMD"
                 local base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
+                local execute_this_command=false
+
                 if [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] || -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]]; then
-                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is allowed."
+                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is allowed by existing config."
+                    execute_this_command=true
+                else
+                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is NOT in allowed commands."
+                    if [[ "$ENABLE_DYNAMIC_COMMAND_APPROVAL" == true ]]; then
+                        log_message "System" "Dynamic command approval is ENABLED. Requesting user permission for '$base_suggested_cmd'."
+                        prompt_for_command_permission_and_update_config "$base_suggested_cmd"
+                        local permission_status=$?
+
+                        case "$permission_status" in
+                            0) # Allowed (either 'yes' or 'always' succeeded)
+                                log_message "System" "Permission granted for '$base_suggested_cmd'."
+                                execute_this_command=true
+                                ;;
+                            1) # Denied
+                                log_message "System" "Permission denied for '$base_suggested_cmd'."
+                                CMD_OUTPUT="Command '$base_suggested_cmd' was denied by the user for this instance."
+                                CMD_STATUS=1 #  Specific code for user denial
+                                LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied by user."
+                                execute_this_command=false
+                                ;;
+                            2) # Cancel task
+                                log_message "System" "Task cancelled by user due to command permission choice for '$base_suggested_cmd'."
+                                task_status="TASK_FAILED" # This will break the main loop after this iteration's EVAL
+                                CMD_OUTPUT="Task cancelled by user at command permission prompt for '$base_suggested_cmd'."
+                                CMD_STATUS=125 # Arbitrary non-zero for cancellation
+                                LAST_ACTION_TAKEN="Task cancelled by user over command '$SUGGESTED_CMD'."
+                                execute_this_command=false
+                                ;;
+                        esac
+                    else
+                        log_message "System" "Dynamic command approval is DISABLED. Command '$base_suggested_cmd' will not be run as it's not in allowed_commands."
+                        CMD_OUTPUT="Command '$base_suggested_cmd' is not in allowed_commands and dynamic approval is disabled."
+                        CMD_STATUS=1 # Indicate failure/denial
+                        LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied (not whitelisted, dynamic approval disabled)."
+                        execute_this_command=false
+                    fi
+                fi
+
+                if [ "$execute_this_command" == "true" ]; then
+                    LAST_ACTION_TAKEN="Executed command: $SUGGESTED_CMD"
                     log_message "Command" "$SUGGESTED_CMD"
                     if [[ "$GREMLIN_MODE" == "true" ]]; then
                         log_message "System" "Executing in Gremlin Mode: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
@@ -677,7 +837,7 @@ handle_task() {
                         CMD_STATUS=$? 
                         log_message "System" "Output:\\n$CMD_OUTPUT"
                     else
-                        printf "${CLR_GREEN}[%s] [User]:${CLR_RESET}${CLR_BOLD_GREEN} Execute suggested command? ${CLR_RESET}\'${CLR_BOLD_YELLOW}%s${CLR_RESET}\'${CLR_BOLD_GREEN} [y/N]: ${CLR_RESET}" "$(date +'%Y-%m-%d %H:%M:%S')" "$SUGGESTED_CMD"
+                        printf "${CLR_GREEN}[%s] [User]:${CLR_RESET}${CLR_BOLD_GREEN} Execute suggested command? ${CLR_RESET}'${CLR_BOLD_YELLOW}%s${CLR_RESET}'${CLR_BOLD_GREEN} [y/N]: ${CLR_RESET}" "$(date +'%Y-%m-%d %H:%M:%S')" "$SUGGESTED_CMD"
                         read -r CONFIRM
                         if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
                             log_message "System" "Executing: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
@@ -685,17 +845,19 @@ handle_task() {
                             CMD_STATUS=$?
                             log_message "System" "Output:\\n$CMD_OUTPUT"
                         else
-                            log_message User "Command execution cancelled."
-                            CMD_STATUS=124 # timeout exit code for user cancellation often, or a distinct non-zero
-                            CMD_OUTPUT="User cancelled execution."
+                            log_message User "Command execution cancelled by user confirmation."
+                            CMD_STATUS=124 
+                            CMD_OUTPUT="User cancelled execution at confirmation prompt."
                         fi
                     fi
-                else
-                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is NOT in allowed commands. Aborting step."
-                    CMD_STATUS=1 # Generic failure
-                    CMD_OUTPUT="Command not allowed by agent configuration."
+                    LAST_ACTION_RESULT="Exit Code: $CMD_STATUS. Output:\\n$CMD_OUTPUT"
+                elif [ "$task_status" == "IN_PROGRESS" ]; then
+                    if [ -z "$LAST_ACTION_TAKEN" ]; then
+                        LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' not executed due to permissions."
+                    fi
+                    LAST_ACTION_RESULT="Exit Code: $CMD_STATUS. Output:\\n$CMD_OUTPUT"
+                    log_message "System" "Command '$SUGGESTED_CMD' was not executed. Reason: $CMD_OUTPUT"
                 fi
-                LAST_ACTION_RESULT="Exit Code: $CMD_STATUS. Output:\\n$CMD_OUTPUT"
             fi
         else
             local actor_question_full_response="$LLM_RESPONSE_CONTENT"
