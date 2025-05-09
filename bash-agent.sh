@@ -1,26 +1,23 @@
 #!/bin/bash
-# This script is designed to perform a given task in a Linux environment, providing
-# environment details such as time, pwd, hostname, and system instructions.
+set -e # Added for stricter error checking
+set +u # Do not treat unset variables as an error
+set -o pipefail
 
+# Log Bash version
+echo "Bash version: $BASH_VERSION" >&2
 # --- ANSI Color Codes ---
-CLR_RESET=$'\033[0m'
-CLR_RED=$'\033[0;31m'
-CLR_GREEN=$'\033[0;32m'
-CLR_YELLOW=$'\033[0;33m'
-CLR_BLUE=$'\033[0;34m'
-CLR_MAGENTA=$'\033[0;35m'
-CLR_CYAN=$'\033[0;36m'
-CLR_WHITE=$'\033[0;37m'
-CLR_BOLD_WHITE=$'\033[1;37m'
-CLR_BOLD_RED=$'\033[1;31m'
-CLR_BOLD_YELLOW=$'\033[1;33m'
-CLR_BOLD_BLUE=$'\033[1;34m'
-CLR_BOLD_MAGENTA=$'\033[1;35m'
-CLR_BOLD_CYAN=$'\033[1;36m'
+CLR_RESET=$'\e[0m'
+CLR_RED=$'\e[0;31m'; CLR_BOLD_RED=$'\e[1;31m'
+CLR_GREEN=$'\e[0;32m'; CLR_BOLD_GREEN=$'\e[1;32m'
+CLR_YELLOW=$'\e[0;33m'; CLR_BOLD_YELLOW=$'\e[1;33m'
+CLR_BLUE=$'\e[0;34m'; CLR_BOLD_BLUE=$'\e[1;34m'
+CLR_MAGENTA=$'\e[0;35m'; CLR_BOLD_MAGENTA=$'\e[1;35m'
+CLR_CYAN=$'\e[0;36m'; CLR_BOLD_CYAN=$'\e[1;36m'
+CLR_WHITE=$'\e[0;37m'; CLR_BOLD_WHITE=$'\e[1;37m'
 
 # --- Logging Function ---
 # log_message <type> <message>
-# Type can be: System, User, Agent, LLM, Command, Error, Warning, Debug
+# Type can be: System, User, Plan Agent, Action Agent, Eval Agent, LLM, Command, Error, Warning, Debug
 # Error messages are sent to stderr
 log_message() {
     local type="$1"
@@ -33,20 +30,22 @@ log_message() {
     local numeric_fd=1 # stdout by default
 
     case "$type" in
-        System)  header_color="$CLR_CYAN"; content_color="$CLR_BOLD_CYAN" ;;
-        User)    header_color="$CLR_GREEN"; content_color="$CLR_BOLD_GREEN" ;;
-        Agent)   header_color="$CLR_BLUE"; content_color="$CLR_BOLD_BLUE" ;;
-        LLM)     header_color="$CLR_MAGENTA"; content_color="$CLR_BOLD_MAGENTA" ;;
-        Command) header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW" ;;
+        System)       header_color="$CLR_CYAN"; content_color="$CLR_BOLD_CYAN" ;;
+        User)         header_color="$CLR_GREEN"; content_color="$CLR_BOLD_GREEN" ;;
+        "Plan Agent")   header_color="$CLR_MAGENTA"; content_color="$CLR_BOLD_MAGENTA" ;; # New
+        "Action Agent") header_color="$CLR_BLUE"; content_color="$CLR_BOLD_BLUE" ;;     # New
+        "Eval Agent")   header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW" ;;  # New
+        LLM)          header_color="$CLR_WHITE"; content_color="$CLR_BOLD_WHITE" ;; # Was Magenta, changed to avoid conflict
+        Command)      header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW" ;; # Eval Agent now uses Yellow, Command can share or change
         Error)
             header_color="$CLR_RED"; content_color="$CLR_BOLD_RED"
             numeric_fd=2 # stderr for errors
             ;;
         Warning)
-            header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW"
+            header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW" # Shares with Eval Agent and Command
             numeric_fd=2 # stderr for warnings
             ;;
-        Debug)   header_color="$CLR_WHITE"; content_color="$CLR_BOLD_WHITE" ;;
+        Debug)   header_color="$CLR_WHITE"; content_color="$CLR_BOLD_WHITE" ;; # Shares with LLM
         *)       header_color="$CLR_WHITE"; content_color="$CLR_BOLD_WHITE" ;; # Default for unknown types
     esac
 
@@ -124,20 +123,30 @@ done
 CONFIG_DIR="./config" # Changed to use local ./config directory
 
 log_message Debug "Preparing to set CONFIG_FILE. CONFIG_DIR='${CONFIG_DIR}'"
-set -x # Enable command tracing
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 declare PAYLOAD_FILE="$CONFIG_DIR/payload.json"
 declare RESPONSE_PATH_FILE="$CONFIG_DIR/response_path_template.txt"
 declare CONTEXT_FILE="$CONFIG_DIR/context.json"
 declare JQ_ERROR_LOG="$CONFIG_DIR/jq_error.log"
-set +x # Disable command tracing
+
+# --- Global State for Agent Loop ---
+declare CURRENT_PLAN_STR=""
+declare -a CURRENT_PLAN_ARRAY=()
+declare CURRENT_STEP_INDEX=0
+declare LAST_ACTION_TAKEN=""
+declare LAST_ACTION_RESULT=""
+declare USER_CLARIFICATION_RESPONSE=""
+declare LAST_EVAL_DECISION_TYPE=""
+declare MAX_ITERATIONS=10 # Prevent infinite loops
 
 # --- Template Definitions ---
 CONFIG_TEMPLATE="# config.yaml - REQUIRED - Configure this file for your environment and LLM
 # Ensure this is valid YAML.
 # endpoint: The URL of your LLM API endpoint.
 # api_key: Your API key, if required by the endpoint. Leave empty or comment out if not needed.
-# system_prompt: The system-level instructions for the LLM.
+# plan_prompt: The system-level instructions for the planning phase.
+# action_prompt: The system-level instructions for the action phase.
+# evaluate_prompt: The system-level instructions for the evaluation phase.
 # allowed_commands: A list of commands the LLM is permitted to suggest.
 #   Each command should have a brief description.
 #   Example:
@@ -153,42 +162,40 @@ endpoint: \"http://localhost:11434/api/generate\" # Example for Ollama /api/gene
 
 # api_key: \"YOUR_API_KEY_HERE\" # Uncomment and replace if your LLM requires an API key
 
-system_prompt: |
-  You are a helpful AI assistant running in a Linux shell environment.
-  Your goal is to assist the user with their tasks by suggesting appropriate bash commands.
-  Current time: $(date +'%Y-%m-%d %H:%M:%S')
-  Current directory: $PWD
+plan_prompt: |
+  You are the \"Planner\" module of a multi-step AI assistant specialized in the Linux shell environment.
+  Your primary goal is to understand the user's overall task and create a step-by-step plan to achieve it.
+  You operate with the current context:
+  Time: $(date +'%Y-%m-%d %H:%M:%S')
+  Directory: $PWD
   Hostname: $(hostname)
+  Refer to your detailed directives for output format (using <plan> and <think> tags, or <decision>CLARIFY_USER</decision>).
 
-  IMPORTANT:
-  1. Analyze the user's request and the environment details provided.
-  2. If the task requires a shell command, respond with the EXACT command to achieve the task,
-     wrapped in a specific code block like this:
-     \`\`\`agent_command
-     <the exact bash command to run>
-     \`\`\`
-  3. Do NOT provide any explanations or text outside of this \`\`\`agent_command ... \`\`\` block if a command is being issued.
-  4. If you need to clarify, or if the task doesn't require a command, respond with plain text.
-  5. You can use the <think></think> block to write down your thoughts before the final response.
-     The content of the <think> block will not be shown to the user but will be logged for debugging.
-     Example:
-     <think>
-     The user wants to list files. The 'ls' command is appropriate.
-     I should use 'ls -l' for a detailed listing.
-     </think>
-     \`\`\`agent_command
-     ls -l
-     \`\`\`
-  6. Only use commands from the allowed list. If a suitable command is not available, state that you cannot perform the task.
+action_prompt: |
+  You are the \"Actor\" module of a multi-step AI assistant specialized in the Linux shell environment.
+  You will be given the user's original request, the overall plan, and the specific current step to execute.
+  Your primary goal is to determine the appropriate bash command (in ```agent_command```) or formulate a question based on the current step.
+  You operate with the current context:
+  Time: $(date +'%Y-%m-%d %H:%M:%S')
+  Directory: $PWD
+  Hostname: $(hostname)
+  Refer to your detailed directives for command generation and textual responses (using <think> tags).
+
+evaluate_prompt: |
+  You are the \"Evaluator\" module of a multi-step AI assistant specialized in the Linux shell environment.
+  You will be given the original request, plan, action taken, and result.
+  Your primary goal is to assess the outcome and decide the next course of action (using <decision>TAG: message</decision> and <think> tags).
+  You operate with the current context:
+  Time: $(date +'%Y-%m-%d %H:%M:%S')
+  Directory: $PWD
+  Hostname: $(hostname)
+  Refer to your detailed directives for decision making (CONTINUE_PLAN, REVISE_PLAN, TASK_COMPLETE, CLARIFY_USER, TASK_FAILED).
 
 allowed_commands:
   ls: \"List directory contents. Use common options like -l, -a, -h as needed.\"
   cat: \"Display file content. Example: cat filename.txt\"
   echo: \"Print text. Example: echo 'Hello World'\"
-  grep: \"Search for patterns in files. Example: grep 'pattern' filename.txt\"
-  find: \"Find files or directories. Example: find . -name '*.txt'\"
   # Add more commands and their descriptions as needed.
-  # Ensure descriptions are concise and helpful.
 
 gremlin_mode: false # Set to true to execute commands without confirmation (DANGEROUS!)
 command_timeout: 30 # Default timeout for commands in seconds
@@ -205,17 +212,6 @@ PAYLOAD_TEMPLATE='{
     "top_p": 0.95,
     "num_ctx": 4096
   }
-  // IMPORTANT: The above is an EXAMPLE structure for Ollama.
-  // You MUST adapt this payload.json to match the specific API requirements of YOUR LLM.
-  // The '\''<system_prompt>'\'' and '\''<user_prompt>'\'' placeholders will be filled by the script.
-  // Remove these comments and the '\''user_instructions'\'' key from the actual file in ~/.config/'$SCRIPT_NAME'/payload.json
-  // "user_instructions": [
-  //   "ACTION REQUIRED: Edit this file ($HOME/.config/$SCRIPT_NAME/payload.json) to match your LLM'\''s API.",
-  //   "Replace '\''your-model-name:latest'\'' with your actual model identifier.",
-  //   "Adjust/add/remove fields like '\''stream'\'', '\''options'\'', etc., as per your LLM API documentation.",
-  //   "The '\''<system_prompt>'\'' and '\''<user_prompt>'\'' placeholders are automatically filled by the script.",
-  //   "After configuring, delete this '\''user_instructions'\'' key and its content."
-  // ]
 }'
 
 RESPONSE_PATH_TEMPLATE="# response_path_template.txt - REQUIRED
@@ -253,25 +249,72 @@ if [ $MISSING_SETUP_FILE -eq 1 ]; then
 fi
 
 # --- Load Configuration ---
-# Validate required config fields using yq
-REQUIRED_CONFIG_FIELDS=(endpoint system_prompt allowed_commands gremlin_mode command_timeout) # api_key is optional
-for field in "${REQUIRED_CONFIG_FIELDS[@]}"; do
-    if ! cat "$CONFIG_FILE" | yq ".$field" >/dev/null 2>&1; then
-        log_message "Error" "Missing or invalid config field '$field' in $CONFIG_FILE."
-        log_message "Error" "Field value found: '$(cat "$CONFIG_FILE" | yq ".$field" 2>&1)'"
+
+# Helper function to capture yq stderr for better error reporting
+read_yq_value() {
+    local field_path="$1"
+    local default_expr="$2" # e.g., "// \"\"" for default empty string, or "// false" for default false
+    local yq_stderr_file
+    yq_stderr_file=$(mktemp)
+    local output
+    output=$(cat "$CONFIG_FILE" | yq -r "${field_path} ${default_expr}" 2> "$yq_stderr_file")
+    local yq_status=$?
+    if [ $yq_status -ne 0 ]; then
+        log_message "Error" "yq failed to read '$field_path' from $CONFIG_FILE. Exit status: $yq_status."
+        if [ -s "$yq_stderr_file" ]; then
+            log_message "Error" "yq stderr: $(cat "$yq_stderr_file")"
+        fi
+        rm -f "$yq_stderr_file"
+        exit 1 # Critical error, exit
+    fi
+    if [ -s "$yq_stderr_file" ]; then # Log warnings from yq even on success if any
+        log_message "Warning" "yq stderr while reading '$field_path' (but command succeeded): $(cat "$yq_stderr_file")"
+    fi
+    rm -f "$yq_stderr_file"
+    echo "$output"
+}
+
+# Validate required config fields are present (simple check, value check later)
+REQUIRED_CONFIG_FIELDS_EXISTENCE=(endpoint plan_prompt action_prompt evaluate_prompt allowed_commands gremlin_mode command_timeout)
+for field in "${REQUIRED_CONFIG_FIELDS_EXISTENCE[@]}"; do
+    if ! cat "$CONFIG_FILE" | yq -e ".$field" >/dev/null 2>&1; then # -e makes yq exit non-zero if path not found
+        log_message "Error" "Required configuration key '.$field' is missing in $CONFIG_FILE."
+        # Check if it was a parsing error vs missing key
+        if ! cat "$CONFIG_FILE" | yq . >/dev/null 2>&1; then
+            log_message "Error" "$CONFIG_FILE appears to be invalid YAML."
+        fi
         exit 1
     fi
 done
 
-# Helper to read YAML fields (raw output, no quotes)
-get_yaml_field() { cat "$CONFIG_FILE" | yq -r "$1"; }
+ENDPOINT=$(read_yq_value ".endpoint" "") # No default, check for empty later
+if [ -z "$ENDPOINT" ] || [ "$ENDPOINT" == "null" ]; then
+    log_message "Error" "Required field '.endpoint' is empty or null in $CONFIG_FILE."
+    exit 1
+fi
 
-ENDPOINT=$(get_yaml_field '.endpoint')
-API_KEY=$(get_yaml_field '.api_key') # Can be empty
-SYSTEM_PROMPT=$(get_yaml_field '.system_prompt')
+API_KEY=$(read_yq_value ".api_key" "// \"\"") # Default to empty string
 
-# Load allowed_commands into an associative array for key checking
-declare -A ALLOWED_COMMAND_CHECK_MAP
+PLAN_PROMPT=$(read_yq_value ".plan_prompt" "")
+if [ -z "$PLAN_PROMPT" ] || [ "$PLAN_PROMPT" == "null" ]; then
+    log_message "Error" "Required field '.plan_prompt' is empty or null in $CONFIG_FILE."
+    exit 1
+fi
+
+ACTION_PROMPT=$(read_yq_value ".action_prompt" "")
+if [ -z "$ACTION_PROMPT" ] || [ "$ACTION_PROMPT" == "null" ]; then
+    log_message "Error" "Required field '.action_prompt' is empty or null in $CONFIG_FILE."
+    exit 1
+fi
+
+EVALUATE_PROMPT=$(read_yq_value ".evaluate_prompt" "")
+if [ -z "$EVALUATE_PROMPT" ] || [ "$EVALUATE_PROMPT" == "null" ]; then
+    log_message "Error" "Required field '.evaluate_prompt' is empty or null in $CONFIG_FILE."
+    exit 1
+fi
+
+# Load allowed_commands into an associative array for key checking (existing logic is mostly fine)
+declare -A ALLOWED_COMMAND_CHECK_MAP # Moved declaration here to be sure
 log_message Debug "Attempting to populate ALLOWED_COMMAND_CHECK_MAP from $CONFIG_FILE"
 
 yq_keys_stderr_file=$(mktemp)
@@ -299,18 +342,25 @@ else
 fi
 rm -f "$yq_keys_stderr_file"
 
-GREMLIN_MODE=$(get_yaml_field '.gremlin_mode')
-COMMAND_TIMEOUT=$(get_yaml_field '.command_timeout // 10') # Default to 10 if not set
+GREMLIN_MODE=$(read_yq_value ".gremlin_mode" "// false")
+if [[ "$GREMLIN_MODE" != "true" && "$GREMLIN_MODE" != "false" ]]; then
+    log_message "Error" "GREMLIN_MODE in $CONFIG_FILE must be 'true' or 'false', got '$GREMLIN_MODE'."
+    exit 1
+fi
+
+COMMAND_TIMEOUT=$(read_yq_value ".command_timeout" "// 30")
+if ! [[ "$COMMAND_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$COMMAND_TIMEOUT" -lt 0 ]; then # Allow 0 for no timeout if desired, though >=1 is typical
+    log_message "Error" "COMMAND_TIMEOUT ('$COMMAND_TIMEOUT') in $CONFIG_FILE must be a non-negative integer."
+    exit 1
+fi
 
 # Read the first non-comment, non-empty line from RESPONSE_PATH_FILE
 RESPONSE_PATH=$(grep -vE '^\s*#|^\s*$' "$RESPONSE_PATH_FILE" | head -n 1 | tr -d '[:space:]')
 
-set -x # Enable command tracing before the problematic log_message
 if [ -z "$RESPONSE_PATH" ]; then
     log_message "Error" "TEST ERROR: RESPONSE_PATH is empty. Problem in file: $RESPONSE_PATH_FILE"
     exit 1
 fi
-set +x # Disable command tracing
 
 # --- Context Management ---
 PWD_HASH=$(echo -n "$PWD" | sha256sum | cut -d' ' -f1)
@@ -367,25 +417,23 @@ append_context() {
         "$CONTEXT_FILE" 2> "$JQ_ERROR_LOG")
     local jq_status=$?
 
-    if [ $jq_status -ne 0 ]; then # Check only jq's exit status for critical failure
+    if [ $jq_status -ne 0 ]; then
         log_message "Error" "jq failed to update $CONTEXT_FILE. JQ exit status: $jq_status."
         log_message "Error" "JQ error messages logged to: $JQ_ERROR_LOG"
         rm -f "$tmp_file"
         return 1
-    elif [ -z "$jq_command_output" ]; then # jq succeeded but produced no output
+    elif [ -z "$jq_command_output" ]; then
          log_message Warning "jq produced empty output while updating $CONTEXT_FILE. This might indicate an issue with the context structure or the jq filter."
          log_message Warning "JQ error messages logged to: $JQ_ERROR_LOG"
-         # Attempt to re-initialize if this happens, as it's unexpected.
          local backup_file="${CONTEXT_FILE}.empty_jq_output.$(date +'%Y%m%d%H%M%S')"
          mv "$CONTEXT_FILE" "$backup_file"
          echo "{}" | jq --arg hash "$PWD_HASH" --argjson entry "$context_entry_json" '. + {($hash): [$entry]}' > "$tmp_file"
-         if [ $? -ne 0 ]; then # Check status of the re-initialization attempt
+         if [ $? -ne 0 ]; then
             log_message "Error" "Error re-initializing context after empty jq output. Context not saved."
             rm -f "$tmp_file"
             return 1
          fi
     else
-        # jq command was successful and produced output
         echo "$jq_command_output" > "$tmp_file"
     fi
 
@@ -401,18 +449,34 @@ append_context() {
 
 # --- Payload Preparation ---
 prepare_payload() {
-    local user_prompt="$1"
-    local config_system_prompt="$SYSTEM_PROMPT" # SYSTEM_PROMPT is global, loaded from config
+    local phase="$1" # "plan", "action", "evaluate"
+    local current_prompt_content="$2" # This will be the user_request for plan, or constructed context for action/evaluate
+    
+    local system_prompt_for_phase=""
+    case "$phase" in
+        plan) system_prompt_for_phase="$PLAN_PROMPT" ;;
+        action) system_prompt_for_phase="$ACTION_PROMPT" ;;
+        evaluate) system_prompt_for_phase="$EVALUATE_PROMPT" ;;
+        *)
+            log_message "Error" "Invalid phase '$phase' provided to prepare_payload."
+            return 1
+            ;;
+    esac
 
     local allowed_commands_yaml_block
-    local yq_yaml_stderr_file=$(mktemp)
+    local yq_yaml_stderr_file
+    yq_yaml_stderr_file=$(mktemp)
     # Get the .allowed_commands as a YAML block string
     allowed_commands_yaml_block=$(cat "$CONFIG_FILE" | yq '.allowed_commands' 2> "$yq_yaml_stderr_file")
     local yq_yaml_status=$?
     
     local tool_instructions_addendum=""
     if [ $yq_yaml_status -eq 0 ] && [ -n "$allowed_commands_yaml_block" ] && [ "$allowed_commands_yaml_block" != "null" ]; then
-        tool_instructions_addendum="You are permitted to use the following commands. Their names and descriptions are provided below in YAML format. Adhere to these commands and their specified uses:\n\n\`\`\`yaml\n${allowed_commands_yaml_block}\n\`\`\`\n\n"
+        # This addendum is primarily for the "action" phase, but could be included in others if needed.
+        # The action_prompt specifically mentions that allowed_commands will be provided.
+        if [ "$phase" == "action" ]; then
+            tool_instructions_addendum="You are permitted to use the following commands. Their names and descriptions are provided below in YAML format. Adhere to these commands and their specified uses:\\n\\n\`\`\`yaml\\n${allowed_commands_yaml_block}\\n\`\`\`\\n\\n"
+        fi
     else
         log_message Warning "Could not fetch or format allowed_commands YAML block for LLM instructions."
         if [ -s "$yq_yaml_stderr_file" ]; then
@@ -421,7 +485,8 @@ prepare_payload() {
     fi
     rm -f "$yq_yaml_stderr_file"
 
-    local final_system_prompt="${tool_instructions_addendum}${config_system_prompt}"
+    # Prepend tool instructions to the specific system prompt for the phase
+    local final_system_prompt_for_phase="${tool_instructions_addendum}${system_prompt_for_phase}"
 
     # Ensure payload.json is valid JSON before processing. User must fix this manually.
     if ! jq -e . "$PAYLOAD_FILE" > /dev/null 2>&1; then
@@ -430,7 +495,9 @@ prepare_payload() {
     fi
 
     # Substitute placeholders in the payload template
-    jq --arg sys "$final_system_prompt" --arg user "$user_prompt" \
+    # The generic <system_prompt> in payload.json will take the phase-specific system prompt.
+    # The generic <user_prompt> in payload.json will take the current_prompt_content.
+    jq --arg sys "$final_system_prompt_for_phase" --arg user "$current_prompt_content" \
         'walk(if type == "string" then
             gsub("<system_prompt>"; $sys) | gsub("<user_prompt>"; $user)
         else . end)' "$PAYLOAD_FILE"
@@ -439,7 +506,6 @@ prepare_payload() {
 
 # --- Command Parsing ---
 parse_suggested_command() {
-    # Extracts the first bash command from a ```agent_command code block within the input string
     echo "$1" | awk '/```agent_command/{flag=1; next} /```/{flag=0} flag' | head -n 1
 }
 
@@ -458,128 +524,296 @@ parse_llm_thought() {
     fi
 }
 
-# --- Task Handling ---
-handle_task() {
-    local task_prompt="$1"
-    local timestamp_for_task
-    timestamp_for_task=$(date +'%Y-%m-%d %H:%M:%S')
-    # Use log_message for user task
-    log_message User "Processing task: $task_prompt"
-
-    # Prepare payload
-    PAYLOAD=$(prepare_payload "$task_prompt")
-    if [ $? -ne 0 ]; then # Check if prepare_payload indicated an error (e.g., invalid PAYLOAD_FILE)
-        # Error message already printed by prepare_payload
-        return 1
-    fi
-
-    local curl_cmd_array=("curl" "-s" "-X" "POST" "$ENDPOINT")
-    curl_cmd_array+=("-H" "Content-Type: application/json")
-
-    # Conditionally add Authorization header
-    if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ "$API_KEY" != "YOUR_API_KEY_HERE" ]; then
-        curl_cmd_array+=("-H" "Authorization: Bearer $API_KEY")
-    fi
-
-    curl_cmd_array+=("-d" "$PAYLOAD")
-
-    # Query LLM endpoint
-    log_message Debug "Attempting to query LLM endpoint: $ENDPOINT"
-    set -x # Enable command tracing to see the exact curl command
-    RESPONSE=$("${curl_cmd_array[@]}")
-    set +x # Disable command tracing
-
-    local llm_response_timestamp
-    llm_response_timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-
-    if [[ -z "$RESPONSE" || "$RESPONSE" == "null" ]]; then
-        log_message "LLM" "Error: No response or null response from LLM endpoint."
-        # Attempt to log context even with empty/null LLM response
-        append_context "$task_prompt" "{\"error\": \"No response or null response from LLM endpoint at $llm_response_timestamp\"}"
-        return 1 # Indicate error
-    fi
-
-    LLM_MESSAGE_CONTENT=$(echo "$RESPONSE" | jq -r "$RESPONSE_PATH")
-
-    if [ $? -ne 0 ] || [ "$LLM_MESSAGE_CONTENT" == "null" ] || [ -z "$LLM_MESSAGE_CONTENT" ]; then
-        log_message "LLM" "Error: Failed to extract message content from LLM response using JQ path '$RESPONSE_PATH'."
-        log_message "LLM" "Raw Response was: $RESPONSE" # Print raw response for debugging this specific error
-        append_context "$task_prompt" "$RESPONSE" # Log the full raw response
-        return 1
-    fi
-
-    LLM_THOUGHT=$(parse_llm_thought "$LLM_MESSAGE_CONTENT")
-    if [ -n "$LLM_THOUGHT" ]; then
-        # log_message will handle multi-line thoughts with hanging indents
-        log_message "Agent" "$LLM_THOUGHT"
-    fi
-
-    SUGGESTED_CMD=$(parse_suggested_command "$LLM_MESSAGE_CONTENT")
-
-    if [[ -n "$SUGGESTED_CMD" ]]; then
-        # Extract the base command from the suggested command string - e.g., 'ls' from 'ls -l /tmp'
-        local base_suggested_cmd
-        base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
-
-        # Check if the base command is in ALLOWED_COMMAND_CHECK_MAP - keys of the associative array
-        if [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] ]]; then # -v checks if key exists in bash 4.3+
-            local msg_allowed
-            printf -v msg_allowed "Command '%s' from '%s' is allowed." "$base_suggested_cmd" "$SUGGESTED_CMD"
-            log_message "System" "$msg_allowed"
-            log_message "Command" "$SUGGESTED_CMD" # Log the command only if it's allowed
-        else
-            # Fallback for bash < 4.3 or if -v is not behaving as expected - though it should for existing keys
-            if [ -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]; then # The '-' ensures it doesn't error on unbound variable if key truly doesn't exist
-                 local msg_allowed_fallback
-                 printf -v msg_allowed_fallback "Command '%s' from '%s' is allowed - fallback check." "$base_suggested_cmd" "$SUGGESTED_CMD"
-                 log_message "System" "$msg_allowed_fallback"
-                 log_message "Command" "$SUGGESTED_CMD" # Log the command only if it's allowed - fallback check
-            else
-                local msg_not_allowed
-                printf -v msg_not_allowed "Command '%s' from '%s' is NOT in the list of allowed commands. Aborting." "$base_suggested_cmd" "$SUGGESTED_CMD"
-                log_message "System" "$msg_not_allowed"
-                log_message "System" "Allowed commands are: ${!ALLOWED_COMMAND_CHECK_MAP[*]}"
-                append_context "$task_prompt" "$RESPONSE"
-                log_message "Agent" "Task aborted because the command is not allowed."
-                return 1
-            fi
-        fi
-        
-        CMD_STATUS=0 # Initialize CMD_STATUS
-        if [[ "$GREMLIN_MODE" == "true" ]]; then
-            log_message "System" "Executing in Gremlin Mode: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
-            # Pipe output through log_message
-            timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do log_message "System" "$line"; done
-            CMD_STATUS=${PIPESTATUS[0]}
-        else
-            local confirm_timestamp_display
-            confirm_timestamp_display=$(date +'%Y-%m-%d %H:%M:%S')
-            # Use printf for the prompt part to avoid issues with read -p and complex strings/colors
-            # Header: Dark Green. Question Text: Light Green. Command: Light Yellow. [y/N]: Light Green.
-            printf "${CLR_GREEN}[%s] [User]:${CLR_RESET}${CLR_BOLD_GREEN} Execute suggested command? ${CLR_RESET}'${CLR_BOLD_YELLOW}%s${CLR_RESET}'${CLR_BOLD_GREEN} [y/N]: ${CLR_RESET}" "$confirm_timestamp_display" "$SUGGESTED_CMD"
-            read -r CONFIRM
-            if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-                log_message "System" "Executing: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
-                # Pipe output through log_message
-                timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do log_message "System" "$line"; done
-                CMD_STATUS=${PIPESTATUS[0]}
-            else
-                log_message User "Command execution cancelled."
-                CMD_STATUS=1 # Treat cancellation as a failure for task status
-            fi
-        fi
-
-        if [[ $CMD_STATUS -eq 0 ]]; then
-            log_message Agent "Command executed successfully. Task complete."
-        else
-            log_message Agent "Command failed or was cancelled. Exit code: $CMD_STATUS. Please review output."
-        fi
+parse_llm_plan() {
+    local input_str="$1"
+    if [[ "$input_str" == *"<plan>"* && "$input_str" == *"</plan>"* ]]; then
+        local plan_content="${input_str#*<plan>}"
+        plan_content="${plan_content%%</plan>*}"
+        # Trim leading/trailing whitespace and newlines
+        plan_content=$(echo "$plan_content" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        echo "$plan_content"
     else
-        log_message Agent "No command suggested by LLM."
+        echo "" # No plan block found
+    fi
+}
+
+parse_llm_decision() {
+    local input_str="$1"
+    # Extracts content from <decision>TAG: content</decision>
+    # Returns "TAG: content"
+    if [[ "$input_str" == *"<decision>"* && "$input_str" == *"</decision>"* ]]; then
+        local decision_content="${input_str#*<decision>}"
+        decision_content="${decision_content%%</decision>*}"
+        decision_content=$(echo "$decision_content" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        echo "$decision_content"
+    else
+        echo "" # No decision block found
+    fi
+}
+
+# --- Task Handling (Refactored for Plan-Act-Evaluate) ---
+handle_task() {
+    local initial_user_prompt="$1"
+    local current_iteration=0
+    local task_status="IN_PROGRESS" # Can be IN_PROGRESS, TASK_COMPLETE, TASK_FAILED
+
+    # Initialize or reset state for the new task
+    CURRENT_PLAN_STR=""
+    CURRENT_PLAN_ARRAY=()
+    CURRENT_STEP_INDEX=0
+    LAST_ACTION_TAKEN=""
+    LAST_ACTION_RESULT=""
+    USER_CLARIFICATION_RESPONSE=""
+    LAST_EVAL_DECISION_TYPE="" # Reset this at the start of a new task
+    
+    local current_context_for_llm="$initial_user_prompt"
+
+    log_message User "Starting task: $initial_user_prompt"
+
+    while [ "$current_iteration" -lt "$MAX_ITERATIONS" ] && [ "$task_status" == "IN_PROGRESS" ]; do
+        current_iteration=$((current_iteration + 1))
+        log_message System "Iteration: $current_iteration/$MAX_ITERATIONS"
+
+        # 1. PLAN PHASE (or re-plan)
+        if [ -z "$CURRENT_PLAN_STR" ] || [[ "$LAST_EVAL_DECISION_TYPE" == "REVISE_PLAN" ]] || 
+           ([[ -n "$USER_CLARIFICATION_RESPONSE" ]] && ([[ "$LAST_EVAL_DECISION_TYPE" == "CLARIFY_USER" ]] || [[ "$LAST_EVAL_DECISION_TYPE" == "PLANNER_CLARIFY" ]])); then # PLANNER_CLARIFY is a pseudo-type for internal logic
+            log_message System "Entering PLAN phase."
+            local planner_input_prompt="$current_context_for_llm"
+
+            PAYLOAD=$(prepare_payload "plan" "$planner_input_prompt")
+            if [ $? -ne 0 ]; then log_message "Error" "Failed to prepare payload for PLAN phase."; task_status="TASK_FAILED"; break; fi
+
+            RESPONSE=$(curl -s -X POST "$ENDPOINT" -H "Content-Type: application/json" ${API_KEY:+-H "Authorization: Bearer $API_KEY"} -d "$PAYLOAD")
+            if [ -z "$RESPONSE" ]; then log_message "Error" "No response from LLM for PLAN phase."; task_status="TASK_FAILED"; break; fi
+            log_message Debug "PLAN phase: Attempting to parse with RESPONSE_PATH: '$RESPONSE_PATH'"
+            LLM_RESPONSE_CONTENT=$(printf "%s" "$RESPONSE" | jq -r "$RESPONSE_PATH") # Changed echo to printf
+            local jq_exit_status=$?
+
+            if [ $jq_exit_status -ne 0 ] || [ -z "$LLM_RESPONSE_CONTENT" ] || [ "$LLM_RESPONSE_CONTENT" == "null" ]; then 
+                log_message "Error" "Failed to extract/validate LLM response for PLAN. Raw: $RESPONSE"; 
+                task_status="TASK_FAILED"; break; 
+            fi
+            append_context "Planner Input: $planner_input_prompt" "$RESPONSE"
+
+            LLM_THOUGHT=$(parse_llm_thought "$LLM_RESPONSE_CONTENT")
+            if [ -n "$LLM_THOUGHT" ]; then log_message "Plan Agent" "[Planner Thought]: $LLM_THOUGHT"; fi
+
+            DECISION_FROM_PLANNER=$(parse_llm_decision "$LLM_RESPONSE_CONTENT")
+            if [[ "$DECISION_FROM_PLANNER" == CLARIFY_USER:* ]]; then
+                CLARIFICATION_QUESTION="${DECISION_FROM_PLANNER#CLARIFY_USER: }"
+                log_message "Plan Agent" "[Planner Clarification]: $CLARIFICATION_QUESTION"
+                printf "${CLR_GREEN}Plan Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
+                read -r USER_CLARIFICATION_RESPONSE
+                current_context_for_llm="Original request: '$initial_user_prompt'. My previous question (from Planner): '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please generate a new plan based on this clarification."
+                LAST_EVAL_DECISION_TYPE="PLANNER_CLARIFY" 
+                CURRENT_PLAN_STR="" 
+                continue 
+            fi
+            
+            CURRENT_PLAN_STR=$(parse_llm_plan "$LLM_RESPONSE_CONTENT")
+            if [ -z "$CURRENT_PLAN_STR" ]; then
+                log_message "Error" "Planner did not return a plan. LLM Response: $LLM_RESPONSE_CONTENT"
+                printf "${CLR_RED}Agent: I could not devise a plan. Could you please rephrase or provide more details?${CLR_RESET}\\n"
+                task_status="TASK_FAILED"; break;
+            fi
+            log_message "Plan Agent" "[Planner Plan]:\\n$CURRENT_PLAN_STR"
+            mapfile -t CURRENT_PLAN_ARRAY < <(echo "$CURRENT_PLAN_STR" | sed '/^[[:space:]]*$/d') 
+            CURRENT_STEP_INDEX=0
+            USER_CLARIFICATION_RESPONSE="" 
+            LAST_EVAL_DECISION_TYPE="" # Clear decision type after successful planning
+        fi
+
+        # 2. ACTION PHASE
+        if [ "$CURRENT_STEP_INDEX" -ge "${#CURRENT_PLAN_ARRAY[@]}" ]; then
+            log_message System "All plan steps executed or no plan steps. Moving to final evaluation or completion."
+            if [[ "$task_status" == "IN_PROGRESS" ]]; then
+                 log_message "System" "Plan exhausted. Last evaluator decision was: $LAST_EVAL_DECISION_TYPE. Task status: $task_status"
+            fi
+            break 
+        fi
+
+        local current_step_detail="${CURRENT_PLAN_ARRAY[$CURRENT_STEP_INDEX]}"
+        log_message System "Entering ACTION phase for step $((CURRENT_STEP_INDEX + 1))/${#CURRENT_PLAN_ARRAY[@]}: $current_step_detail"
+
+        local actor_input_prompt="User's original request: '$initial_user_prompt'\\n\\nOverall Plan:\\n$CURRENT_PLAN_STR\\n\\nCurrent step to execute: '$current_step_detail'"
+        
+        PAYLOAD=$(prepare_payload "action" "$actor_input_prompt")
+        if [ $? -ne 0 ]; then log_message "Error" "Failed to prepare payload for ACTION phase."; task_status="TASK_FAILED"; break; fi
+        
+        RESPONSE=$(curl -s -X POST "$ENDPOINT" -H "Content-Type: application/json" ${API_KEY:+-H "Authorization: Bearer $API_KEY"} -d "$PAYLOAD")
+        if [ -z "$RESPONSE" ]; then log_message "Error" "No response from LLM for ACTION phase."; task_status="TASK_FAILED"; break; fi
+        log_message Debug "ACTION phase: Attempting to parse with RESPONSE_PATH: '$RESPONSE_PATH'"
+        LLM_RESPONSE_CONTENT=$(printf "%s" "$RESPONSE" | jq -r "$RESPONSE_PATH") # Changed echo to printf
+        local jq_exit_status=$?
+
+        if [ $jq_exit_status -ne 0 ] || [ -z "$LLM_RESPONSE_CONTENT" ] || [ "$LLM_RESPONSE_CONTENT" == "null" ]; then 
+            log_message "Error" "Failed to extract/validate LLM response for ACTION. Raw: $RESPONSE"; 
+            task_status="TASK_FAILED"; break; 
+        fi
+        append_context "Actor Input: $actor_input_prompt" "$RESPONSE"
+
+        LLM_THOUGHT=$(parse_llm_thought "$LLM_RESPONSE_CONTENT")
+        if [ -n "$LLM_THOUGHT" ]; then log_message "Action Agent" "[Actor Thought]: $LLM_THOUGHT"; fi
+
+        SUGGESTED_CMD=$(parse_suggested_command "$LLM_RESPONSE_CONTENT")
+        CMD_OUTPUT=""
+        CMD_STATUS=-1 # Default to -1 to indicate command not run or other issue
+
+        if [[ -n "$SUGGESTED_CMD" ]]; then
+            if [[ "$SUGGESTED_CMD" == "report_task_completion" ]]; then
+                log_message "Eval Agent" "Received report_task_completion. Task will be marked as complete."
+                task_status="TASK_COMPLETE" # This will be handled by the main loop
+                LAST_ACTION_TAKEN="Internal command: report_task_completion"
+                LAST_ACTION_RESULT="Task marked as complete by Evaluator."
+            else
+                LAST_ACTION_TAKEN="Executed command: $SUGGESTED_CMD"
+                local base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
+                if [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] || -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]]; then
+                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is allowed."
+                    log_message "Command" "$SUGGESTED_CMD"
+                    if [[ "$GREMLIN_MODE" == "true" ]]; then
+                        log_message "System" "Executing in Gremlin Mode: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
+                        CMD_OUTPUT=$(timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1)
+                        CMD_STATUS=$? 
+                        log_message "System" "Output:\\n$CMD_OUTPUT"
+                    else
+                        printf "${CLR_GREEN}[%s] [User]:${CLR_RESET}${CLR_BOLD_GREEN} Execute suggested command? ${CLR_RESET}\'${CLR_BOLD_YELLOW}%s${CLR_RESET}\'${CLR_BOLD_GREEN} [y/N]: ${CLR_RESET}" "$(date +'%Y-%m-%d %H:%M:%S')" "$SUGGESTED_CMD"
+                        read -r CONFIRM
+                        if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+                            log_message "System" "Executing: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
+                            CMD_OUTPUT=$(timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1)
+                            CMD_STATUS=$?
+                            log_message "System" "Output:\\n$CMD_OUTPUT"
+                        else
+                            log_message User "Command execution cancelled."
+                            CMD_STATUS=124 # timeout exit code for user cancellation often, or a distinct non-zero
+                            CMD_OUTPUT="User cancelled execution."
+                        fi
+                    fi
+                else
+                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is NOT in allowed commands. Aborting step."
+                    CMD_STATUS=1 # Generic failure
+                    CMD_OUTPUT="Command not allowed by agent configuration."
+                fi
+                LAST_ACTION_RESULT="Exit Code: $CMD_STATUS. Output:\\n$CMD_OUTPUT"
+            fi
+        else
+            local actor_question_full_response="$LLM_RESPONSE_CONTENT"
+            if [ -n "$LLM_THOUGHT" ]; then
+                 actor_question_full_response="${actor_question_full_response//$LLM_THOUGHT/}"
+                 actor_question_full_response="${actor_question_full_response//<think>/}"
+                 actor_question_full_response="${actor_question_full_response//<\/think>/}"
+            fi
+            local actor_question=$(echo "$actor_question_full_response" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            
+            if [ -z "$actor_question" ]; then
+                log_message Warning "Actor did not suggest a command and provided no textual response/question."
+                LAST_ACTION_TAKEN="Actor provided no command and no question."
+                LAST_ACTION_RESULT="Actor LLM response was empty or only contained thought: $LLM_RESPONSE_CONTENT"
+                CMD_STATUS=1 # Indicate failure for this action step, evaluator needs to decide what to do.
+            else
+                log_message "Action Agent" "[Actor Question]: $actor_question"
+                printf "${CLR_GREEN}Action Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$actor_question"
+                read -r USER_CLARIFICATION_RESPONSE
+                LAST_ACTION_TAKEN="Asked user (by Action Agent as per plan): $actor_question"
+                LAST_ACTION_RESULT="User responded: $USER_CLARIFICATION_RESPONSE"
+                CMD_STATUS=0 # Question asked and answered, considered success for this action step
+            fi
+        fi
+        log_message Debug "Last Action Taken: $LAST_ACTION_TAKEN"
+        log_message Debug "Last Action Result: $LAST_ACTION_RESULT"
+
+        # 3. EVALUATION PHASE
+        if [[ "$task_status" == "TASK_COMPLETE" && "$SUGGESTED_CMD" == "report_task_completion" ]]; then
+            log_message System "Skipping Evaluation phase as task was completed by report_task_completion."
+            break # Exit main while loop, task completion will be handled
+        fi
+
+        log_message System "Entering EVALUATION phase."
+        local evaluator_input_prompt="User's original request: '$initial_user_prompt'\\n\\nOverall Plan:\\n$CURRENT_PLAN_STR\\n\\nAction Taken for step '$((CURRENT_STEP_INDEX + 1)) ($current_step_detail)':\\n$LAST_ACTION_TAKEN\\n\\nResult of Action:\\n$LAST_ACTION_RESULT"
+
+        PAYLOAD=$(prepare_payload "evaluate" "$evaluator_input_prompt")
+        if [ $? -ne 0 ]; then log_message "Error" "Failed to prepare payload for EVALUATION phase."; task_status="TASK_FAILED"; break; fi
+
+        RESPONSE=$(curl -s -X POST "$ENDPOINT" -H "Content-Type: application/json" ${API_KEY:+-H "Authorization: Bearer $API_KEY"} -d "$PAYLOAD")
+        if [ -z "$RESPONSE" ]; then log_message "Error" "No response from LLM for EVALUATION phase."; task_status="TASK_FAILED"; break; fi
+        log_message Debug "EVALUATION phase: Attempting to parse with RESPONSE_PATH: '$RESPONSE_PATH'"
+        LLM_RESPONSE_CONTENT=$(printf "%s" "$RESPONSE" | jq -r "$RESPONSE_PATH") # Changed echo to printf
+        local jq_exit_status=$?
+
+        if [ $jq_exit_status -ne 0 ] || [ -z "$LLM_RESPONSE_CONTENT" ] || [ "$LLM_RESPONSE_CONTENT" == "null" ]; then 
+            log_message "Error" "Failed to extract/validate LLM response for EVALUATION. Raw: $RESPONSE"; 
+            task_status="TASK_FAILED"; break; 
+        fi
+        append_context "Evaluator Input: $evaluator_input_prompt" "$RESPONSE"
+
+        LLM_THOUGHT=$(parse_llm_thought "$LLM_RESPONSE_CONTENT")
+        if [ -n "$LLM_THOUGHT" ]; then log_message "Eval Agent" "[Evaluator Thought]: $LLM_THOUGHT"; fi
+
+        EVALUATOR_DECISION_FULL=$(parse_llm_decision "$LLM_RESPONSE_CONTENT")
+        log_message "Eval Agent" "[Evaluator Decision]: $EVALUATOR_DECISION_FULL"
+
+        if [ -z "$EVALUATOR_DECISION_FULL" ]; then
+            log_message "Error" "Evaluator did not return a decision. LLM Response: $LLM_RESPONSE_CONTENT. Assuming task failed."
+            task_status="TASK_FAILED"; break;
+        fi
+
+        EVALUATOR_DECISION_TYPE="${EVALUATOR_DECISION_FULL%%:*}"
+        EVALUATOR_MESSAGE="${EVALUATOR_DECISION_FULL#*: }"
+        LAST_EVAL_DECISION_TYPE="$EVALUATOR_DECISION_TYPE"
+
+        case "$EVALUATOR_DECISION_TYPE" in
+            TASK_COMPLETE)
+                log_message "Eval Agent" "Task marked COMPLETE by evaluator. Summary: $EVALUATOR_MESSAGE"
+                task_status="TASK_COMPLETE"
+                ;;
+            TASK_FAILED)
+                log_message "Eval Agent" "Task marked FAILED by evaluator. Reason: $EVALUATOR_MESSAGE"
+                task_status="TASK_FAILED"
+                ;;
+            CONTINUE_PLAN)
+                log_message "Eval Agent" "Evaluator: CONTINUE_PLAN. $EVALUATOR_MESSAGE"
+                CURRENT_STEP_INDEX=$((CURRENT_STEP_INDEX + 1))
+                USER_CLARIFICATION_RESPONSE="" 
+                ;;
+            REVISE_PLAN)
+                log_message "Eval Agent" "Evaluator: REVISE_PLAN. Reason: $EVALUATOR_MESSAGE"
+                current_context_for_llm="Original request: '$initial_user_prompt'. The previous plan step ('$current_step_detail') resulted in: '$LAST_ACTION_RESULT'. Evaluator suggests revision: '$EVALUATOR_MESSAGE'. Please provide a new plan."
+                CURRENT_PLAN_STR="" 
+                USER_CLARIFICATION_RESPONSE=""
+                ;;
+            CLARIFY_USER)
+                CLARIFICATION_QUESTION="$EVALUATOR_MESSAGE"
+                log_message "Eval Agent" "[Evaluator Clarification]: $CLARIFICATION_QUESTION"
+                printf "${CLR_GREEN}Eval Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
+                read -r USER_CLARIFICATION_RESPONSE
+                current_context_for_llm="Original request: '$initial_user_prompt'. After action '$LAST_ACTION_TAKEN' (result: '$LAST_ACTION_RESULT'), evaluator needs clarification. Question asked: '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please generate a new plan or determine next step based on this clarification."
+                CURRENT_PLAN_STR="" 
+                ;;
+            *)
+                log_message "Error" "Unknown decision from Evaluator: '$EVALUATOR_DECISION_FULL'. Assuming task failed."
+                task_status="TASK_FAILED"
+                ;;
+        esac
+        
+        if [ "$task_status" != "IN_PROGRESS" ]; then
+            break 
+        fi
+
+    done # End of main while loop
+
+    if [ "$current_iteration" -ge "$MAX_ITERATIONS" ] && [ "$task_status" == "IN_PROGRESS" ]; then
+        log_message "Error" "Task exceeded maximum iterations ($MAX_ITERATIONS). Aborting."
+        task_status="TASK_FAILED"
     fi
 
-    append_context "$task_prompt" "$RESPONSE" # Log the original full LLM response
-    return $CMD_STATUS # Return command status, or 0 if no command, 1 if other error
+    if [ "$task_status" == "TASK_COMPLETE" ]; then
+        log_message User "Task completed successfully."
+        return 0
+    else
+        log_message User "Task failed or was aborted."
+        return 1
+    fi
 }
 
 # --- Main Loop ---
@@ -590,8 +824,6 @@ if [ "$#" -gt 0 ]; then
     handle_task "$USER_PROMPT_ARGS"
 else
     while true; do
-        # Use printf for the prompt part to avoid issues with read -p and complex strings/colors
-        # Prompt text: Dark Green
         printf "${CLR_GREEN}Enter your task (or 'exit' to quit):${CLR_RESET} "
         read -r USER_PROMPT_LOOP
         if [[ "$USER_PROMPT_LOOP" == "exit" ]]; then
