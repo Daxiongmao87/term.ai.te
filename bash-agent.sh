@@ -25,9 +25,9 @@ CLR_BOLD_CYAN=$'\033[1;36m'
 log_message() {
     local type="$1"
     shift
-    local message="$*"
+    local message_content="$*" # Renamed to avoid confusion
     local timestamp
-    timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+    timestamp=$(date +'%Y-%m-%d %H:%M:%S') # Safer quoting for date format
     local header_color=""
     local content_color=""
     local numeric_fd=1 # stdout by default
@@ -43,7 +43,7 @@ log_message() {
             numeric_fd=2 # stderr for errors
             ;;
         Warning)
-            header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW" # Dark Yellow header, Light Yellow content
+            header_color="$CLR_YELLOW"; content_color="$CLR_BOLD_YELLOW"
             numeric_fd=2 # stderr for warnings
             ;;
         Debug)   header_color="$CLR_WHITE"; content_color="$CLR_BOLD_WHITE" ;;
@@ -51,11 +51,30 @@ log_message() {
     esac
 
     local header_text="${header_color}[$timestamp] [$type]: ${CLR_RESET}"
-    local indent="                   " # Length of "[YYYY-MM-DD HH:MM:SS] [Type]: "
-    indent="${indent:0:${#timestamp}+${#type}+6}" # Adjust indent based on actual length
+    # Calculate indent based on actual length of timestamp and type for consistent alignment
+    local indent_length=$(( ${#timestamp} + ${#type} + 6 )) # [YYYY-MM-DD HH:MM:SS] [Type]:<space>
+    local indent_str=""
+    printf -v indent_str '%*s' "$indent_length" '' # Create a string of spaces for indent
+
+    # Use a temporary file for the message to handle special characters robustly with sed
+    local tmp_msg_file
+    tmp_msg_file=$(mktemp)
+    # Fallback if mktemp fails (should be caught by dependency check)
+    if [ -z "$tmp_msg_file" ] || [ ! -f "$tmp_msg_file" ]; then
+        # Direct echo if mktemp failed; formatting might be imperfect for multiline.
+        echo "${header_text}${content_color}${message_content}${CLR_RESET}" >&"${numeric_fd}"
+        [ -n "$tmp_msg_file" ] && rm -f "$tmp_msg_file" # Clean up if tmp_msg_file was set but ! -f
+        return
+    fi
+    printf '%s\n' "$message_content" > "$tmp_msg_file" # Changed from echo to printf
 
     # Apply content_color to the message part of each line and CLR_RESET at the end of each line.
-    echo "$message" | sed -e "1s|^|${header_text}${content_color}|" -e "2,\$s|^|${indent}${content_color}|" -e "s|$|${CLR_RESET}|" >&"${numeric_fd}"
+    # The first line gets the header, subsequent lines get indentation.
+    sed -e "1s|^|${header_text}${content_color}|" \
+        -e "2,\$s|^|${indent_str}${content_color}|" \
+        -e "s|\$|${CLR_RESET}|" "$tmp_msg_file" >&"${numeric_fd}" # Sed reads from tmp_msg_file
+
+    rm -f "$tmp_msg_file"
 }
 
 # --- Dependency Check ---
@@ -67,9 +86,9 @@ for cmd in jq curl yq mktemp timeout awk sha256sum sed grep head cut; do
     if [ "$cmd" = "yq" ]; then
         # Specifically check for mikefarah/yq
         if ! yq --version 2>&1 | grep -q 'https://github.com/mikefarah/yq'; then
-            log_message "Error" "Go-based yq (https://github.com/mikefarah/yq) is required."
-            log_message "Error" "You may have a different yq installed (e.g., Python yq)."
-            log_message "Error" "Please install the Go version (e.g., 'sudo snap install yq' or see https://github.com/mikefarah/yq)."
+            log_message "Error" "Go-based yq - see https://github.com/mikefarah/yq - is required."
+            log_message "Error" "You may have a different yq installed - e.g. Python yq."
+            log_message "Error" "Please install the Go version - e.g. 'sudo snap install yq' or see https://github.com/mikefarah/yq."
             exit 1
         fi
     fi
@@ -82,70 +101,88 @@ for cmd in jq curl yq mktemp timeout awk sha256sum sed grep head cut; do
         CURRENT_JQ_MINOR=$(echo "$JQ_VERSION_NUMBER" | cut -d. -f2)
 
         if [[ "$CURRENT_JQ_MAJOR" -lt "$MIN_JQ_MAJOR" ]] || ([[ "$CURRENT_JQ_MAJOR" -eq "$MIN_JQ_MAJOR" ]] && [[ "$CURRENT_JQ_MINOR" -lt "$MIN_JQ_MINOR" ]]); then
-            log_message "Error" "jq version 1.6 or higher is required for certain JSON operations (like gsub). You have $JQ_VERSION."
-            log_message "Error" "Please upgrade jq (e.g., sudo apt install --only-upgrade jq or check your package manager)."
+            log_message "Error" "jq version 1.6 or higher is required for certain JSON operations like gsub. You have $JQ_VERSION."
+            log_message "Error" "Please upgrade jq - e.g. sudo apt install --only-upgrade jq or check your package manager."
             exit 1
         fi
     fi
 done
 
 # --- Tool Call Instructions for LLM ---
-TOOL_CALL_INSTRUCTIONS="IMPORTANT: You are a shell assistant. To perform any task that requires executing a shell command, you MUST respond by providing ONLY the exact bash command(s) to be run, wrapped in a specific code block like this:
-
-\`\`\`agent_command
-<the exact bash command to run>
-\`\`\`
-
-Do NOT provide explanations before or after this block. Do NOT output the expected result of the command. Only output the command itself in this format. This is the ONLY way commands will be executed."
+# TOOL_CALL_INSTRUCTIONS will be built dynamically later based on allowed_commands
 
 # --- Configuration Variables ---
-SCRIPT_NAME=$(basename "$0" .sh)
-CONFIG_DIR="$HOME/.config/$SCRIPT_NAME"
+CONFIG_DIR="$HOME/.config/bash-agent" # Changed to use local ./config directory
+
+log_message Debug "Preparing to set CONFIG_FILE. CONFIG_DIR='${CONFIG_DIR}'"
+set -x # Enable command tracing
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
-PAYLOAD_FILE="$CONFIG_DIR/payload.json"
-RESPONSE_PATH_FILE="$CONFIG_DIR/response_path_template.txt"
-CONTEXT_FILE="$CONFIG_DIR/context.json"
-JQ_ERROR_LOG="$CONFIG_DIR/jq_error.log" # File to log specific jq errors for context handling
+declare PAYLOAD_FILE="$CONFIG_DIR/payload.json"
+declare RESPONSE_PATH_FILE="$CONFIG_DIR/response_path_template.txt"
+declare CONTEXT_FILE="$CONFIG_DIR/context.json"
+declare JQ_ERROR_LOG="$CONFIG_DIR/jq_error.log"
+set +x # Disable command tracing
 
 # --- Template Definitions ---
-CONFIG_TEMPLATE="# config.yaml - REQUIRED
-# The endpoint for your LLM API (e.g., http://localhost:11434/api/generate for Ollama)
-endpoint: \"http://localhost:11434/api/generate\"
-# Your API key (if required, leave empty if not, e.g., for local Ollama)
-api_key: \"\"
-# The system prompt for the LLM.
+CONFIG_TEMPLATE="# config.yaml - REQUIRED - Configure this file for your environment and LLM
+# Ensure this is valid YAML.
+# endpoint: The URL of your LLM API endpoint.
+# api_key: Your API key, if required by the endpoint. Leave empty or comment out if not needed.
+# system_prompt: The system-level instructions for the LLM.
+# allowed_commands: A list of commands the LLM is permitted to suggest.
+#   Each command should have a brief description.
+#   Example:
+#     ls: \"List directory contents.\"
+#     cat: \"Display file content.\"
+#     echo: \"Print text to the console.\"
+# gremlin_mode: If true, executes suggested commands without confirmation. DANGEROUS!
+# command_timeout: Timeout in seconds for executed commands (e.g., 10 for 10 seconds).
+
+endpoint: \"http://localhost:11434/api/generate\" # Example for Ollama /api/generate
+# endpoint: \"http://localhost:11434/api/chat\" # Example for Ollama /api/chat
+# endpoint: \"https://api.openai.com/v1/chat/completions\" # Example for OpenAI
+
+# api_key: \"YOUR_API_KEY_HERE\" # Uncomment and replace if your LLM requires an API key
+
 system_prompt: |
-  You are a helpful shell assistant.
-  You can answer questions and suggest commands.
-  Please be verbose and safe.
-  When you want to suggest a bash command for the user to run, always wrap it in a code block like this:
-  \`\`\`agent_command
-  <the bash command>
-  \`\`\`
-  Never use any other format for commands. Only use this format for commands you want the agent to execute.
-# List of allowed commands (whitelist). Only the command itself, not arguments.
-whitelist:
-  - ls
-  - cat
-  - echo
-  - pwd
-  - cd
-  - mkdir
-  - touch
-  - head
-  - tail
-  - grep
-  - find
-# List of forbidden commands (blacklist).
-blacklist:
-  - rm
-  - shutdown
-  - reboot
-  - sudo # Example: prevent sudo usage
-# If true, commands are executed automatically. If false, user confirmation is required.
-gremlin_mode: false
-# Timeout for command execution (in seconds)
-command_timeout: 10
+  You are a helpful AI assistant running in a Linux shell environment.
+  Your goal is to assist the user with their tasks by suggesting appropriate bash commands.
+  Current time: $(date +'%Y-%m-%d %H:%M:%S')
+  Current directory: $PWD
+  Hostname: $(hostname)
+
+  IMPORTANT:
+  1. Analyze the user's request and the environment details provided.
+  2. If the task requires a shell command, respond with the EXACT command to achieve the task,
+     wrapped in a specific code block like this:
+     \`\`\`agent_command
+     <the exact bash command to run>
+     \`\`\`
+  3. Do NOT provide any explanations or text outside of this \`\`\`agent_command ... \`\`\` block if a command is being issued.
+  4. If you need to clarify, or if the task doesn't require a command, respond with plain text.
+  5. You can use the <think></think> block to write down your thoughts before the final response.
+     The content of the <think> block will not be shown to the user but will be logged for debugging.
+     Example:
+     <think>
+     The user wants to list files. The 'ls' command is appropriate.
+     I should use 'ls -l' for a detailed listing.
+     </think>
+     \`\`\`agent_command
+     ls -l
+     \`\`\`
+  6. Only use commands from the allowed list. If a suitable command is not available, state that you cannot perform the task.
+
+allowed_commands:
+  ls: \"List directory contents. Use common options like -l, -a, -h as needed.\"
+  cat: \"Display file content. Example: cat filename.txt\"
+  echo: \"Print text. Example: echo 'Hello World'\"
+  grep: \"Search for patterns in files. Example: grep 'pattern' filename.txt\"
+  find: \"Find files or directories. Example: find . -name '*.txt'\"
+  # Add more commands and their descriptions as needed.
+  # Ensure descriptions are concise and helpful.
+
+gremlin_mode: false # Set to true to execute commands without confirmation (DANGEROUS!)
+command_timeout: 30 # Default timeout for commands in seconds
 "
 
 PAYLOAD_TEMPLATE='{
@@ -186,29 +223,29 @@ mkdir -p "$CONFIG_DIR"
 MISSING_SETUP_FILE=0
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "$CONFIG_TEMPLATE" > "$CONFIG_FILE"
-    log_message "System" "Generated config template: $CONFIG_FILE"
+    log_message System "Generated config template: $CONFIG_FILE"
     MISSING_SETUP_FILE=1
 fi
 if [ ! -f "$PAYLOAD_FILE" ]; then
     echo "$PAYLOAD_TEMPLATE" > "$PAYLOAD_FILE" # Will contain comments initially
-    log_message "System" "Generated payload template: $PAYLOAD_FILE"
-    log_message "System" "IMPORTANT: Review and edit $PAYLOAD_FILE to be valid JSON matching your LLM API, then remove comments."
+    log_message System "Generated payload template: $PAYLOAD_FILE"
+    log_message System "IMPORTANT: Review and edit $PAYLOAD_FILE to be valid JSON matching your LLM API, then remove comments."
     MISSING_SETUP_FILE=1
 fi
 if [ ! -f "$RESPONSE_PATH_FILE" ]; then
     echo "$RESPONSE_PATH_TEMPLATE" > "$RESPONSE_PATH_FILE"
-    log_message "System" "Generated response path template: $RESPONSE_PATH_FILE"
+    log_message System "Generated response path template: $RESPONSE_PATH_FILE"
     MISSING_SETUP_FILE=1
 fi
 if [ $MISSING_SETUP_FILE -eq 1 ]; then
-    log_message "System" "One or more configuration templates were generated in $CONFIG_DIR."
-    log_message "System" "Please review and configure them before running $SCRIPT_NAME again."
+    log_message System "One or more configuration templates were generated in $CONFIG_DIR."
+    log_message System "Please review and configure them before running $SCRIPT_NAME again."
     exit 1
 fi
 
 # --- Load Configuration ---
 # Validate required config fields using yq
-REQUIRED_CONFIG_FIELDS=(endpoint system_prompt whitelist blacklist gremlin_mode command_timeout) # api_key is optional
+REQUIRED_CONFIG_FIELDS=(endpoint system_prompt allowed_commands gremlin_mode command_timeout) # api_key is optional
 for field in "${REQUIRED_CONFIG_FIELDS[@]}"; do
     if ! cat "$CONFIG_FILE" | yq ".$field" >/dev/null 2>&1; then
         log_message "Error" "Missing or invalid config field '$field' in $CONFIG_FILE."
@@ -219,28 +256,80 @@ done
 
 # Helper to read YAML fields (raw output, no quotes)
 get_yaml_field() { cat "$CONFIG_FILE" | yq -r "$1"; }
-# Helper to read YAML lists into a bash array
-get_yaml_list_as_array() {
-    local field_path="$1"
-    local arr=()
-    mapfile -t arr < <(cat "$CONFIG_FILE" | yq -r "${field_path}[]") # e.g., .whitelist[]
-    echo "${arr[@]}"
-}
 
 ENDPOINT=$(get_yaml_field '.endpoint')
 API_KEY=$(get_yaml_field '.api_key') # Can be empty
 SYSTEM_PROMPT=$(get_yaml_field '.system_prompt')
-WHITELIST=( $(get_yaml_list_as_array '.whitelist[]') )
-BLACKLIST=( $(get_yaml_list_as_array '.blacklist[]') )
+
+# Load allowed_commands into an associative array
+declare -A ALLOWED_COMMANDS
+log_message Debug "Attempting to populate ALLOWED_COMMANDS from $CONFIG_FILE using user-specified yq and grep method"
+
+yq_stderr_file=$(mktemp)
+
+base_yq_output_file=$(mktemp)
+
+# Step 1: Get the raw output of .allowed_commands from yq
+ALLOWED_COMMANDS=$(cat "$CONFIG_FILE" | yq -r '.allowed_commands')
+if [ "$ALLOWED_COMMANDS" == "null" ]; then
+    log_message "Error" "yq .allowed_commands failed. Exit code: $?"
+    if [ -s "$yq_stderr_file" ]; then
+        log_message "Error" "yq stderr: $(cat "$yq_stderr_file")"
+    fi
+    log_message Warning "ALLOWED_COMMANDS array will be empty."
+    rm -f "$yq_stderr_file" "$base_yq_output_file"
+else
+    # Step 2: Extract keys using grep
+    command_keys_array=()
+    mapfile -t command_keys_array < <(echo "$ALLOWED_COMMANDS" | grep -oP '^[^:]*')
+    log_message Debug "Extracted keys: \"${command_keys_array[*]}\"" # Quoted array expansion
+
+    # Step 3: Extract values using grep
+    command_values_array=()
+    # Corrected grep pattern to only handle double-quoted values, avoiding the problematic single quote in the regex string
+    mapfile -t command_values_array < <(echo "$ALLOWED_COMMANDS" | grep -oP '(?<=: \")[^\"]*')
+    log_message Debug "Extracted values: \"${command_values_array[*]}\"" # Quoted array expansion
+
+    # Step 4: Populate the associative array
+    if [ ${#command_keys_array[@]} -ne ${#command_values_array[@]} ]; then
+        log_message "Error" "Mismatch between the number of extracted keys (${#command_keys_array[@]}) and values (${#command_values_array[@]})."
+        log_message "Error" "Keys: ${command_keys_array[*]}"
+        log_message "Error" "Values: ${command_values_array[*]}"
+        log_message Warning "ALLOWED_COMMANDS array may be incomplete or incorrect."
+    else
+        for i in "${!command_keys_array[@]}"; do
+            key="${command_keys_array[i]}" # Removed local
+            value="${command_values_array[i]}" # Removed local
+            
+            log_message Debug "Attempting to assign to ALLOWED_COMMANDS: KEY='${key}' (length: ${#key}), VALUE='${value}'"
+
+            if [ -z "$key" ]; then
+                log_message Warning "Skipping empty key found at index $i."
+                continue
+            fi
+            
+            # Further clean up value if it was captured with trailing quote from yq's inconsistent output
+            # value=$(echo "$value" | sed 's/\"$//') 
+            ALLOWED_COMMANDS["$key"]="$value"
+            # log_message Debug "Loaded allowed command: KEY='${key}' VALUE='${value}'" # Temporarily commented out
+        done
+        log_message Debug "ALLOWED_COMMANDS population complete. Count: ${#ALLOWED_COMMANDS[@]}"
+    fi
+    rm -f "$yq_stderr_file" "$base_yq_output_file"
+fi
+
 GREMLIN_MODE=$(get_yaml_field '.gremlin_mode')
 COMMAND_TIMEOUT=$(get_yaml_field '.command_timeout // 10') # Default to 10 if not set
 
 # Read the first non-comment, non-empty line from RESPONSE_PATH_FILE
 RESPONSE_PATH=$(grep -vE '^\s*#|^\s*$' "$RESPONSE_PATH_FILE" | head -n 1 | tr -d '[:space:]')
+
+set -x # Enable command tracing before the problematic log_message
 if [ -z "$RESPONSE_PATH" ]; then
-    log_message "Error" "No valid JQ path found in $RESPONSE_PATH_FILE. It must contain a non-comment, non-empty line with the JQ path (e.g., .response)."
+    log_message "Error" "TEST ERROR: RESPONSE_PATH is empty. Problem in file: $RESPONSE_PATH_FILE"
     exit 1
 fi
+set +x # Disable command tracing
 
 # --- Context Management ---
 PWD_HASH=$(echo -n "$PWD" | sha256sum | cut -d' ' -f1)
@@ -281,7 +370,7 @@ append_context() {
     else
         # Check if the existing context file is valid JSON, if not, initialize it
         if ! jq -e . "$CONTEXT_FILE" > /dev/null 2>&1; then
-            log_message "Warning" "$CONTEXT_FILE was not valid JSON. Initializing a new one."
+            log_message Warning "$CONTEXT_FILE was not valid JSON. Initializing a new one."
             local backup_file="${CONTEXT_FILE}.invalid.$(date +'%Y%m%d%H%M%S')"
             mv "$CONTEXT_FILE" "$backup_file"
             echo "{}" > "$CONTEXT_FILE"
@@ -299,12 +388,12 @@ append_context() {
 
     if [ $jq_status -ne 0 ]; then # Check only jq's exit status for critical failure
         log_message "Error" "jq failed to update $CONTEXT_FILE. JQ exit status: $jq_status."
-        log_message "Error" "JQ error messages (if any) logged to: $JQ_ERROR_LOG"
+        log_message "Error" "JQ error messages logged to: $JQ_ERROR_LOG"
         rm -f "$tmp_file"
         return 1
     elif [ -z "$jq_command_output" ]; then # jq succeeded but produced no output
-         log_message "Warning" "jq produced empty output while updating $CONTEXT_FILE. This might indicate an issue with the context structure or the jq filter."
-         log_message "Warning" "JQ error messages (if any) logged to: $JQ_ERROR_LOG"
+         log_message Warning "jq produced empty output while updating $CONTEXT_FILE. This might indicate an issue with the context structure or the jq filter."
+         log_message Warning "JQ error messages logged to: $JQ_ERROR_LOG"
          # Attempt to re-initialize if this happens, as it's unexpected.
          local backup_file="${CONTEXT_FILE}.empty_jq_output.$(date +'%Y%m%d%H%M%S')"
          mv "$CONTEXT_FILE" "$backup_file"
@@ -333,11 +422,13 @@ append_context() {
 prepare_payload() {
     local user_prompt="$1"
     # Prepend TOOL_CALL_INSTRUCTIONS to the system prompt from config.yaml
-    local final_system_prompt="$TOOL_CALL_INSTRUCTIONS"$'\n'"$SYSTEM_PROMPT"
+    # Temporarily commenting out TOOL_CALL_INSTRUCTIONS usage
+    # local final_system_prompt="$TOOL_CALL_INSTRUCTIONS"$'\n'"$SYSTEM_PROMPT"
+    local final_system_prompt="$SYSTEM_PROMPT" # Using only SYSTEM_PROMPT for now
 
     # Ensure payload.json is valid JSON before processing. User must fix this manually.
     if ! jq -e . "$PAYLOAD_FILE" > /dev/null 2>&1; then
-        log_message "Error" "$PAYLOAD_FILE is not valid JSON. Please fix it manually (remove comments, ensure correct syntax)."
+        log_message "Error" "$PAYLOAD_FILE is not valid JSON. Please fix it manually - remove comments, ensure correct syntax."
         return 1 # Indicate failure
     fi
 
@@ -376,7 +467,7 @@ handle_task() {
     local timestamp_for_task
     timestamp_for_task=$(date +'%Y-%m-%d %H:%M:%S')
     # Use log_message for user task
-    log_message "User" "Processing task: $task_prompt"
+    log_message User "Processing task: $task_prompt"
 
     # Prepare payload
     PAYLOAD=$(prepare_payload "$task_prompt")
@@ -385,11 +476,21 @@ handle_task() {
         return 1
     fi
 
+    local curl_cmd_array=("curl" "-s" "-X" "POST" "$ENDPOINT")
+    curl_cmd_array+=("-H" "Content-Type: application/json")
+
+    # Conditionally add Authorization header
+    if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ "$API_KEY" != "YOUR_API_KEY_HERE" ]; then
+        curl_cmd_array+=("-H" "Authorization: Bearer $API_KEY")
+    fi
+
+    curl_cmd_array+=("-d" "$PAYLOAD")
+
     # Query LLM endpoint
-    RESPONSE=$(curl -s -X POST "$ENDPOINT" \
-        -H "Authorization: Bearer $API_KEY" \
-        -H "Content-Type: application/json" \
-        -d "$PAYLOAD")
+    log_message Debug "Attempting to query LLM endpoint: $ENDPOINT"
+    set -x # Enable command tracing to see the exact curl command
+    RESPONSE=$("${curl_cmd_array[@]}")
+    set +x # Disable command tracing
 
     local llm_response_timestamp
     llm_response_timestamp=$(date +'%Y-%m-%d %H:%M:%S')
@@ -419,45 +520,37 @@ handle_task() {
     SUGGESTED_CMD=$(parse_suggested_command "$LLM_MESSAGE_CONTENT")
 
     if [[ -n "$SUGGESTED_CMD" ]]; then
-        log_message "Command" "$SUGGESTED_CMD"
-        
-        local blacklisted_cmd=0
-        # Check blacklist
-        for bad in "${BLACKLIST[@]}"; do
-            if [[ "$SUGGESTED_CMD" == *"$bad"* ]]; then
-                log_message "System" "Command '$SUGGESTED_CMD' contains blacklisted term '$bad'. Aborting."
-                blacklisted_cmd=1
-                break
-            fi
-        done
-        if [ "$blacklisted_cmd" -eq 1 ]; then
-            append_context "$task_prompt" "$RESPONSE"
-            log_message "Agent" "Task aborted due to blacklist."
-            return 1 
-        fi
+        # Extract the base command from the suggested command string - e.g., 'ls' from 'ls -l /tmp'
+        local base_suggested_cmd
+        base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
 
-        local whitelisted_cmd=0
-        if [ ${#WHITELIST[@]} -gt 0 ]; then # Only check whitelist if it has entries
-            for good in "${WHITELIST[@]}"; do
-                # Check if the command starts with a whitelisted term followed by a space or end of string
-                if [[ "$SUGGESTED_CMD" == "$good "* || "$SUGGESTED_CMD" == "$good" ]]; then
-                    whitelisted_cmd=1
-                    break
-                fi
-            done
-            if [ "$whitelisted_cmd" -eq 0 ]; then
-                log_message "System" "Command '$SUGGESTED_CMD' is not in whitelist or does not match expected format. Aborting."
+        # Check if the base command is in ALLOWED_COMMANDS - keys of the associative array
+        if [[ -v ALLOWED_COMMANDS["$base_suggested_cmd"] ]]; then # -v checks if key exists in bash 4.3+
+            local msg_allowed
+            printf -v msg_allowed "Command '%s' from '%s' is allowed." "$base_suggested_cmd" "$SUGGESTED_CMD"
+            log_message "System" "$msg_allowed"
+            log_message "Command" "$SUGGESTED_CMD" # Log the command only if it's allowed
+        else
+            # Fallback for bash < 4.3 or if -v is not behaving as expected - though it should for existing keys
+            if [ -n "${ALLOWED_COMMANDS[$base_suggested_cmd]-}" ]; then # The '-' ensures it doesn't error on unbound variable if key truly doesn't exist
+                 local msg_allowed_fallback
+                 printf -v msg_allowed_fallback "Command '%s' from '%s' is allowed - fallback check." "$base_suggested_cmd" "$SUGGESTED_CMD"
+                 log_message "System" "$msg_allowed_fallback"
+                 log_message "Command" "$SUGGESTED_CMD" # Log the command only if it's allowed - fallback check
+            else
+                local msg_not_allowed
+                printf -v msg_not_allowed "Command '%s' from '%s' is NOT in the list of allowed commands. Aborting." "$base_suggested_cmd" "$SUGGESTED_CMD"
+                log_message "System" "$msg_not_allowed"
+                log_message "System" "Allowed commands are: ${!ALLOWED_COMMANDS[*]}"
                 append_context "$task_prompt" "$RESPONSE"
-                log_message "Agent" "Task aborted due to whitelist."
+                log_message "Agent" "Task aborted because the command is not allowed."
                 return 1
             fi
-        else
-            whitelisted_cmd=1 # If whitelist is empty, all commands are allowed (subject to blacklist)
         fi
         
         CMD_STATUS=0 # Initialize CMD_STATUS
         if [[ "$GREMLIN_MODE" == "true" ]]; then
-            log_message "System" "Executing (Gremlin Mode): $SUGGESTED_CMD (timeout: ${COMMAND_TIMEOUT}s)"
+            log_message "System" "Executing in Gremlin Mode: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
             # Pipe output through log_message
             timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do log_message "System" "$line"; done
             CMD_STATUS=${PIPESTATUS[0]}
@@ -469,23 +562,23 @@ handle_task() {
             printf "${CLR_GREEN}[%s] [User]:${CLR_RESET}${CLR_BOLD_GREEN} Execute suggested command? ${CLR_RESET}'${CLR_BOLD_YELLOW}%s${CLR_RESET}'${CLR_BOLD_GREEN} [y/N]: ${CLR_RESET}" "$confirm_timestamp_display" "$SUGGESTED_CMD"
             read -r CONFIRM
             if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-                log_message "System" "Executing: $SUGGESTED_CMD (timeout: ${COMMAND_TIMEOUT}s)"
+                log_message "System" "Executing: $SUGGESTED_CMD - timeout: ${COMMAND_TIMEOUT}s"
                 # Pipe output through log_message
                 timeout "$COMMAND_TIMEOUT" bash -c "$SUGGESTED_CMD" 2>&1 | while IFS= read -r line; do log_message "System" "$line"; done
                 CMD_STATUS=${PIPESTATUS[0]}
             else
-                log_message "User" "Command execution cancelled."
+                log_message User "Command execution cancelled."
                 CMD_STATUS=1 # Treat cancellation as a failure for task status
             fi
         fi
 
         if [[ $CMD_STATUS -eq 0 ]]; then
-            log_message "Agent" "Command executed successfully. Task complete."
+            log_message Agent "Command executed successfully. Task complete."
         else
-            log_message "Agent" "Command failed or was cancelled. Exit code: $CMD_STATUS. Please review output."
+            log_message Agent "Command failed or was cancelled. Exit code: $CMD_STATUS. Please review output."
         fi
     else
-        log_message "Agent" "No command suggested by LLM."
+        log_message Agent "No command suggested by LLM."
     fi
 
     append_context "$task_prompt" "$RESPONSE" # Log the original full LLM response
@@ -493,7 +586,7 @@ handle_task() {
 }
 
 # --- Main Loop ---
-trap 'log_message "System" "Session terminated by user (Ctrl-C)."; exit 0' INT
+trap 'log_message "System" "Session terminated by user - Ctrl-C."; exit 0' INT
 
 if [ "$#" -gt 0 ]; then
     USER_PROMPT_ARGS="$*"
@@ -505,11 +598,11 @@ else
         printf "${CLR_GREEN}Enter your task (or 'exit' to quit):${CLR_RESET} "
         read -r USER_PROMPT_LOOP
         if [[ "$USER_PROMPT_LOOP" == "exit" ]]; then
-            log_message "User" "Exiting session."
+            log_message User "Exiting session."
             break
         fi
         handle_task "$USER_PROMPT_LOOP"
     done
 fi
 
-log_message "System" "Bash Agent finished."
+log_message System "Bash Agent finished."
