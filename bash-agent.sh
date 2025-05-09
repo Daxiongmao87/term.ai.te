@@ -112,7 +112,7 @@ done
 # TOOL_CALL_INSTRUCTIONS will be built dynamically later based on allowed_commands
 
 # --- Configuration Variables ---
-CONFIG_DIR="$HOME/.config/bash-agent" # Changed to use local ./config directory
+CONFIG_DIR="./config" # Changed to use local ./config directory
 
 log_message Debug "Preparing to set CONFIG_FILE. CONFIG_DIR='${CONFIG_DIR}'"
 set -x # Enable command tracing
@@ -261,62 +261,34 @@ ENDPOINT=$(get_yaml_field '.endpoint')
 API_KEY=$(get_yaml_field '.api_key') # Can be empty
 SYSTEM_PROMPT=$(get_yaml_field '.system_prompt')
 
-# Load allowed_commands into an associative array
-declare -A ALLOWED_COMMANDS
-log_message Debug "Attempting to populate ALLOWED_COMMANDS from $CONFIG_FILE using user-specified yq and grep method"
+# Load allowed_commands into an associative array for key checking
+declare -A ALLOWED_COMMAND_CHECK_MAP
+log_message Debug "Attempting to populate ALLOWED_COMMAND_CHECK_MAP from $CONFIG_FILE"
 
-yq_stderr_file=$(mktemp)
+yq_keys_stderr_file=$(mktemp)
+temp_keys_array=()
 
-base_yq_output_file=$(mktemp)
-
-# Step 1: Get the raw output of .allowed_commands from yq
-ALLOWED_COMMANDS=$(cat "$CONFIG_FILE" | yq -r '.allowed_commands')
-if [ "$ALLOWED_COMMANDS" == "null" ]; then
-    log_message "Error" "yq .allowed_commands failed. Exit code: $?"
-    if [ -s "$yq_stderr_file" ]; then
-        log_message "Error" "yq stderr: $(cat "$yq_stderr_file")"
+# Get raw keys, one per line. yq -r is important.
+if ! mapfile -t temp_keys_array < <(cat "$CONFIG_FILE" | yq -r '.allowed_commands | keys | .[]' 2> "$yq_keys_stderr_file"); then
+    log_message "Error" "Failed to read command keys using yq and mapfile."
+    if [ -s "$yq_keys_stderr_file" ]; then
+        log_message "Error" "yq stderr (keys): $(cat "$yq_keys_stderr_file")"
     fi
-    log_message Warning "ALLOWED_COMMANDS array will be empty."
-    rm -f "$yq_stderr_file" "$base_yq_output_file"
+    log_message Warning "ALLOWED_COMMAND_CHECK_MAP will be empty."
 else
-    # Step 2: Extract keys using grep
-    command_keys_array=()
-    mapfile -t command_keys_array < <(echo "$ALLOWED_COMMANDS" | grep -oP '^[^:]*')
-    log_message Debug "Extracted keys: \"${command_keys_array[*]}\"" # Quoted array expansion
-
-    # Step 3: Extract values using grep
-    command_values_array=()
-    # Corrected grep pattern to only handle double-quoted values, avoiding the problematic single quote in the regex string
-    mapfile -t command_values_array < <(echo "$ALLOWED_COMMANDS" | grep -oP '(?<=: \")[^\"]*')
-    log_message Debug "Extracted values: \"${command_values_array[*]}\"" # Quoted array expansion
-
-    # Step 4: Populate the associative array
-    if [ ${#command_keys_array[@]} -ne ${#command_values_array[@]} ]; then
-        log_message "Error" "Mismatch between the number of extracted keys (${#command_keys_array[@]}) and values (${#command_values_array[@]})."
-        log_message "Error" "Keys: ${command_keys_array[*]}"
-        log_message "Error" "Values: ${command_values_array[*]}"
-        log_message Warning "ALLOWED_COMMANDS array may be incomplete or incorrect."
+    if [ ${#temp_keys_array[@]} -eq 0 ]; then
+        log_message Warning "No command keys found under '.allowed_commands' in $CONFIG_FILE (or yq produced no output). ALLOWED_COMMAND_CHECK_MAP will be empty."
     else
-        for i in "${!command_keys_array[@]}"; do
-            key="${command_keys_array[i]}" # Removed local
-            value="${command_values_array[i]}" # Removed local
-            
-            log_message Debug "Attempting to assign to ALLOWED_COMMANDS: KEY='${key}' (length: ${#key}), VALUE='${value}'"
-
-            if [ -z "$key" ]; then
-                log_message Warning "Skipping empty key found at index $i."
-                continue
+        for key in "${temp_keys_array[@]}"; do
+            if [ -n "$key" ]; then
+                ALLOWED_COMMAND_CHECK_MAP["$key"]=1
+                log_message Debug "Added allowed command key to map: '$key'"
             fi
-            
-            # Further clean up value if it was captured with trailing quote from yq's inconsistent output
-            # value=$(echo "$value" | sed 's/\"$//') 
-            ALLOWED_COMMANDS["$key"]="$value"
-            # log_message Debug "Loaded allowed command: KEY='${key}' VALUE='${value}'" # Temporarily commented out
         done
-        log_message Debug "ALLOWED_COMMANDS population complete. Count: ${#ALLOWED_COMMANDS[@]}"
+        log_message Debug "ALLOWED_COMMAND_CHECK_MAP population complete. Count: ${#ALLOWED_COMMAND_CHECK_MAP[@]}"
     fi
-    rm -f "$yq_stderr_file" "$base_yq_output_file"
 fi
+rm -f "$yq_keys_stderr_file"
 
 GREMLIN_MODE=$(get_yaml_field '.gremlin_mode')
 COMMAND_TIMEOUT=$(get_yaml_field '.command_timeout // 10') # Default to 10 if not set
@@ -421,10 +393,26 @@ append_context() {
 # --- Payload Preparation ---
 prepare_payload() {
     local user_prompt="$1"
-    # Prepend TOOL_CALL_INSTRUCTIONS to the system prompt from config.yaml
-    # Temporarily commenting out TOOL_CALL_INSTRUCTIONS usage
-    # local final_system_prompt="$TOOL_CALL_INSTRUCTIONS"$'\n'"$SYSTEM_PROMPT"
-    local final_system_prompt="$SYSTEM_PROMPT" # Using only SYSTEM_PROMPT for now
+    local config_system_prompt="$SYSTEM_PROMPT" # SYSTEM_PROMPT is global, loaded from config
+
+    local allowed_commands_yaml_block
+    local yq_yaml_stderr_file=$(mktemp)
+    # Get the .allowed_commands as a YAML block string
+    allowed_commands_yaml_block=$(cat "$CONFIG_FILE" | yq '.allowed_commands' 2> "$yq_yaml_stderr_file")
+    local yq_yaml_status=$?
+    
+    local tool_instructions_addendum=""
+    if [ $yq_yaml_status -eq 0 ] && [ -n "$allowed_commands_yaml_block" ] && [ "$allowed_commands_yaml_block" != "null" ]; then
+        tool_instructions_addendum="You are permitted to use the following commands. Their names and descriptions are provided below in YAML format. Adhere to these commands and their specified uses:\n\n\`\`\`yaml\n${allowed_commands_yaml_block}\n\`\`\`\n\n"
+    else
+        log_message Warning "Could not fetch or format allowed_commands YAML block for LLM instructions."
+        if [ -s "$yq_yaml_stderr_file" ]; then
+            log_message Warning "yq stderr (allowed_commands YAML): $(cat "$yq_yaml_stderr_file")"
+        fi
+    fi
+    rm -f "$yq_yaml_stderr_file"
+
+    local final_system_prompt="${tool_instructions_addendum}${config_system_prompt}"
 
     # Ensure payload.json is valid JSON before processing. User must fix this manually.
     if ! jq -e . "$PAYLOAD_FILE" > /dev/null 2>&1; then
@@ -524,15 +512,15 @@ handle_task() {
         local base_suggested_cmd
         base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
 
-        # Check if the base command is in ALLOWED_COMMANDS - keys of the associative array
-        if [[ -v ALLOWED_COMMANDS["$base_suggested_cmd"] ]]; then # -v checks if key exists in bash 4.3+
+        # Check if the base command is in ALLOWED_COMMAND_CHECK_MAP - keys of the associative array
+        if [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] ]]; then # -v checks if key exists in bash 4.3+
             local msg_allowed
             printf -v msg_allowed "Command '%s' from '%s' is allowed." "$base_suggested_cmd" "$SUGGESTED_CMD"
             log_message "System" "$msg_allowed"
             log_message "Command" "$SUGGESTED_CMD" # Log the command only if it's allowed
         else
             # Fallback for bash < 4.3 or if -v is not behaving as expected - though it should for existing keys
-            if [ -n "${ALLOWED_COMMANDS[$base_suggested_cmd]-}" ]; then # The '-' ensures it doesn't error on unbound variable if key truly doesn't exist
+            if [ -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]; then # The '-' ensures it doesn't error on unbound variable if key truly doesn't exist
                  local msg_allowed_fallback
                  printf -v msg_allowed_fallback "Command '%s' from '%s' is allowed - fallback check." "$base_suggested_cmd" "$SUGGESTED_CMD"
                  log_message "System" "$msg_allowed_fallback"
@@ -541,7 +529,7 @@ handle_task() {
                 local msg_not_allowed
                 printf -v msg_not_allowed "Command '%s' from '%s' is NOT in the list of allowed commands. Aborting." "$base_suggested_cmd" "$SUGGESTED_CMD"
                 log_message "System" "$msg_not_allowed"
-                log_message "System" "Allowed commands are: ${!ALLOWED_COMMANDS[*]}"
+                log_message "System" "Allowed commands are: ${!ALLOWED_COMMAND_CHECK_MAP[*]}"
                 append_context "$task_prompt" "$RESPONSE"
                 log_message "Agent" "Task aborted because the command is not allowed."
                 return 1
