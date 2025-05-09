@@ -110,6 +110,15 @@ done
 
 # --- Tool Call Instructions for LLM ---
 # TOOL_CALL_INSTRUCTIONS will be built dynamically later based on allowed_commands
+# and will include the following command execution guidelines:
+#
+# **Command Execution:**
+# *   If the task requires a shell command, respond *only* with the EXACT command to achieve the task,
+#     wrapped in a specific code block:
+#     \`\`\`agent_command
+#     <the exact bash command to run>
+#     \`\`\`
+# *   Do NOT provide any explanations or text outside of this \`\`\`agent_command ... \`\`\` block when issuing a command.
 
 # --- Configuration Variables ---
 CONFIG_DIR="./config" # Changed to use local ./config directory
