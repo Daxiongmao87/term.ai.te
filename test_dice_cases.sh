@@ -1,5 +1,0 @@
-./dice.sh "3d6 + 2d10"
-./dice.sh "d20 + (d6 * 2)"
-./dice.sh "d6 + d6"
-./dice.sh "2d6 * (d4 + d8)"
-./dice.sh "d10 + d10 * 2"

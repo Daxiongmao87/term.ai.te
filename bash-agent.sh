@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e # Added for stricter error checking
+# Leave out the original "set -e" which causes script to exit on any error
 set +u # Do not treat unset variables as an error
 set -o pipefail
 
@@ -23,6 +23,12 @@ log_message() {
     local type="$1"
     shift
     local message_content="$*" # Renamed to avoid confusion
+    
+    # Skip Debug messages when debug is disabled
+    if [ "$type" = "Debug" ] && [ "$ENABLE_DEBUG" != "true" ]; then
+        return 0
+    fi
+    
     local timestamp
     timestamp=$(date +'%Y-%m-%d %H:%M:%S') # Safer quoting for date format
     local header_color=""
@@ -120,7 +126,7 @@ done
 # *   Do NOT provide any explanations or text outside of this \`\`\`agent_command ... \`\`\` block when issuing a command.
 
 # --- Configuration Variables ---
-CONFIG_DIR="./config" # Changed to use local ./config directory
+CONFIG_DIR="$HOME/.config/bash-agent" # Changed to use local ./config directory
 
 log_message Debug "Preparing to set CONFIG_FILE. CONFIG_DIR='${CONFIG_DIR}'"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
@@ -128,6 +134,9 @@ declare PAYLOAD_FILE="$CONFIG_DIR/payload.json"
 declare RESPONSE_PATH_FILE="$CONFIG_DIR/response_path_template.txt"
 declare CONTEXT_FILE="$CONFIG_DIR/context.json"
 declare JQ_ERROR_LOG="$CONFIG_DIR/jq_error.log"
+
+# Debug flag - set to false by default, will be updated from config
+ENABLE_DEBUG=false
 
 # --- Global State for Agent Loop ---
 declare CURRENT_PLAN_STR=""
@@ -396,6 +405,13 @@ if ! [[ "$COMMAND_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$COMMAND_TIMEOUT" -lt 0 ]; then 
     log_message "Error" "COMMAND_TIMEOUT ('$COMMAND_TIMEOUT') in $CONFIG_FILE must be a non-negative integer."
     exit 1
 fi
+
+ENABLE_DEBUG=$(read_yq_value ".enable_debug" "// false")
+if [[ "$ENABLE_DEBUG" != "true" && "$ENABLE_DEBUG" != "false" ]]; then
+    log_message "Warning" "ENABLE_DEBUG in $CONFIG_FILE must be 'true' or 'false', got '$ENABLE_DEBUG'. Defaulting to 'false'."
+    ENABLE_DEBUG="false"
+fi
+log_message Debug "ENABLE_DEBUG set to: $ENABLE_DEBUG"
 
 # Read the first non-comment, non-empty line from RESPONSE_PATH_FILE
 RESPONSE_PATH=$(grep -vE '^\s*#|^\s*$' "$RESPONSE_PATH_FILE" | head -n 1 | tr -d '[:space:]')
@@ -819,7 +835,7 @@ prompt_for_command_permission_and_update_config() {
     local cmd_to_check="$1"
 
     printf "${CLR_YELLOW}The agent wants to use the command '%s', which is not in the allowed list.${CLR_RESET}\n" "$cmd_to_check"
-    printf "${CLR_YELLOW}Do you want to allow this? (y)es (this instance) / (n)o (deny this instance) / (a)lways (add to config & run) / (c)ancel task: ${CLR_RESET}"
+    printf "${CLR_YELLOW}Do you want to allow this? (y)es (this instance) / (n)o (deny this instance) / (a)lways (add to config & run) / (c)cancel task: ${CLR_RESET}"
     read -r USER_DECISION
 
     case "$USER_DECISION" in
@@ -921,15 +937,19 @@ handle_task() {
             CURRENT_INSTRUCTION=$(parse_llm_instruction "$LLM_RESPONSE_CONTENT")
             
             if [ -z "$CURRENT_PLAN_STR" ]; then
-                log_message "Error" "Planner did not return a checklist. LLM Response: $LLM_RESPONSE_CONTENT"
-                printf "${CLR_RED}Agent: I could not devise a checklist. Could you please rephrase or provide more details?${CLR_RESET}\\n"
-                task_status="TASK_FAILED"; break;
+                log_message "Warning" "Planner did not return a checklist. Requesting new plan."
+                current_context_for_llm="Original request: '$initial_user_prompt'. Your previous response did not include a proper <checklist> section. Please create a new plan with a proper checklist and instruction."
+                LAST_EVAL_DECISION_TYPE="REVISE_PLAN"
+                CURRENT_PLAN_STR="" 
+                continue
             fi
             
             if [ -z "$CURRENT_INSTRUCTION" ]; then
-                log_message "Error" "Planner did not return an instruction. LLM Response: $LLM_RESPONSE_CONTENT"
-                printf "${CLR_RED}Agent: I could not determine the next instruction. Could you please rephrase or provide more details?${CLR_RESET}\\n"
-                task_status="TASK_FAILED"; break;
+                log_message "Warning" "Planner did not return an instruction. Requesting new plan with instruction."
+                current_context_for_llm="Original request: '$initial_user_prompt'. Your previous response did not include a proper <instruction> section. Please create a new plan with a proper instruction for the next step."
+                LAST_EVAL_DECISION_TYPE="REVISE_PLAN"
+                CURRENT_PLAN_STR=""
+                continue
             fi
             
             log_message "Plan Agent" "[Planner Checklist]:\\n$CURRENT_PLAN_STR"
@@ -1111,6 +1131,9 @@ handle_task() {
                     fi
                     LAST_ACTION_RESULT="Exit Code: $CMD_STATUS. Output:\\n$CMD_OUTPUT"
                     log_message "System" "Command '$SUGGESTED_CMD' was not executed. Reason: $CMD_OUTPUT"
+                    
+                    # Continue with evaluation phase even when a command is rejected
+                    # This ensures the agent can recover from rejected commands rather than terminating
                 fi
             fi
         else
