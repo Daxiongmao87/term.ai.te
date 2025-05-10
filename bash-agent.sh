@@ -131,6 +131,7 @@ declare JQ_ERROR_LOG="$CONFIG_DIR/jq_error.log"
 
 # --- Global State for Agent Loop ---
 declare CURRENT_PLAN_STR=""
+declare CURRENT_INSTRUCTION=""  # New variable to hold the instruction for Action Agent
 declare -a CURRENT_PLAN_ARRAY=()
 declare CURRENT_STEP_INDEX=0
 declare LAST_ACTION_TAKEN=""
@@ -530,14 +531,27 @@ parse_llm_thought() {
 
 parse_llm_plan() {
     local input_str="$1"
-    if [[ "$input_str" == *"<plan>"* && "$input_str" == *"</plan>"* ]]; then
-        local plan_content="${input_str#*<plan>}"
-        plan_content="${plan_content%%</plan>*}"
+    if [[ "$input_str" == *"<checklist>"* && "$input_str" == *"</checklist>"* ]]; then
+        local checklist_content="${input_str#*<checklist>}"
+        checklist_content="${checklist_content%%</checklist>*}"
         # Trim leading/trailing whitespace and newlines
-        plan_content=$(echo "$plan_content" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        echo "$plan_content"
+        checklist_content=$(echo "$checklist_content" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        echo "$checklist_content"
     else
-        echo "" # No plan block found
+        echo "" # No checklist block found
+    fi
+}
+
+parse_llm_instruction() {
+    local input_str="$1"
+    if [[ "$input_str" == *"<instruction>"* && "$input_str" == *"</instruction>"* ]]; then
+        local instruction_content="${input_str#*<instruction>}"
+        instruction_content="${instruction_content%%</instruction>*}"
+        # Trim leading/trailing whitespace and newlines
+        instruction_content=$(echo "$instruction_content" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        echo "$instruction_content"
+    else
+        echo "" # No instruction block found
     fi
 }
 
@@ -770,7 +784,8 @@ handle_task() {
 
     # Initialize or reset state for the new task
     CURRENT_PLAN_STR=""
-    CURRENT_PLAN_ARRAY=()
+    CURRENT_INSTRUCTION=""  # New variable to hold the instruction for Action Agent
+    CURRENT_PLAN_ARRAY=()   # This will hold the checklist items
     CURRENT_STEP_INDEX=0
     LAST_ACTION_TAKEN=""
     LAST_ACTION_RESULT=""
@@ -822,12 +837,23 @@ handle_task() {
             fi
             
             CURRENT_PLAN_STR=$(parse_llm_plan "$LLM_RESPONSE_CONTENT")
+            CURRENT_INSTRUCTION=$(parse_llm_instruction "$LLM_RESPONSE_CONTENT")
+            
             if [ -z "$CURRENT_PLAN_STR" ]; then
-                log_message "Error" "Planner did not return a plan. LLM Response: $LLM_RESPONSE_CONTENT"
-                printf "${CLR_RED}Agent: I could not devise a plan. Could you please rephrase or provide more details?${CLR_RESET}\\n"
+                log_message "Error" "Planner did not return a checklist. LLM Response: $LLM_RESPONSE_CONTENT"
+                printf "${CLR_RED}Agent: I could not devise a checklist. Could you please rephrase or provide more details?${CLR_RESET}\\n"
                 task_status="TASK_FAILED"; break;
             fi
-            log_message "Plan Agent" "[Planner Plan]:\\n$CURRENT_PLAN_STR"
+            
+            if [ -z "$CURRENT_INSTRUCTION" ]; then
+                log_message "Error" "Planner did not return an instruction. LLM Response: $LLM_RESPONSE_CONTENT"
+                printf "${CLR_RED}Agent: I could not determine the next instruction. Could you please rephrase or provide more details?${CLR_RESET}\\n"
+                task_status="TASK_FAILED"; break;
+            fi
+            
+            log_message "Plan Agent" "[Planner Checklist]:\\n$CURRENT_PLAN_STR"
+            log_message "Plan Agent" "[Next Instruction]: $CURRENT_INSTRUCTION"
+            
             mapfile -t CURRENT_PLAN_ARRAY < <(echo "$CURRENT_PLAN_STR" | sed '/^[[:space:]]*$/d') 
             CURRENT_STEP_INDEX=0
             USER_CLARIFICATION_RESPONSE="" 
@@ -835,18 +861,9 @@ handle_task() {
         fi
 
         # 2. ACTION PHASE
-        if [ "$CURRENT_STEP_INDEX" -ge "${#CURRENT_PLAN_ARRAY[@]}" ]; then
-            log_message System "All plan steps executed or no plan steps. Moving to final evaluation or completion."
-            if [[ "$task_status" == "IN_PROGRESS" ]]; then
-                 log_message "System" "Plan exhausted. Last evaluator decision was: $LAST_EVAL_DECISION_TYPE. Task status: $task_status"
-            fi
-            break 
-        fi
+        log_message System "Entering ACTION phase for instruction: $CURRENT_INSTRUCTION"
 
-        local current_step_detail="${CURRENT_PLAN_ARRAY[$CURRENT_STEP_INDEX]}"
-        log_message System "Entering ACTION phase for step $((CURRENT_STEP_INDEX + 1))/${#CURRENT_PLAN_ARRAY[@]}: $current_step_detail"
-
-        local actor_input_prompt="User's original request: '$initial_user_prompt'\\n\\nOverall Plan:\\n$CURRENT_PLAN_STR\\n\\nCurrent step to execute: '$current_step_detail'"
+        local actor_input_prompt="User's original request: '$initial_user_prompt'\\n\\nInstruction to execute: '$CURRENT_INSTRUCTION'"
         
         PAYLOAD=$(prepare_payload "action" "$actor_input_prompt")
         if [ $? -ne 0 ]; then log_message "Error" "Failed to prepare payload for ACTION phase."; task_status="TASK_FAILED"; break; fi
@@ -972,7 +989,7 @@ handle_task() {
                 log_message "Action Agent" "[Actor Question]: $actor_question"
                 printf "${CLR_GREEN}Action Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$actor_question"
                 read -r USER_CLARIFICATION_RESPONSE
-                LAST_ACTION_TAKEN="Asked user (by Action Agent as per plan): $actor_question"
+                LAST_ACTION_TAKEN="Asked user (by Action Agent as per instruction): $actor_question"
                 LAST_ACTION_RESULT="User responded: $USER_CLARIFICATION_RESPONSE"
                 CMD_STATUS=0 # Question asked and answered, considered success for this action step
             fi
@@ -987,7 +1004,7 @@ handle_task() {
         fi
 
         log_message System "Entering EVALUATION phase."
-        local evaluator_input_prompt="User's original request: '$initial_user_prompt'\\n\\nOverall Plan:\\n$CURRENT_PLAN_STR\\n\\nAction Taken for step '$((CURRENT_STEP_INDEX + 1)) ($current_step_detail)':\\n$LAST_ACTION_TAKEN\\n\\nResult of Action:\\n$LAST_ACTION_RESULT"
+        local evaluator_input_prompt="User's original request: '$initial_user_prompt'\\n\\nChecklist:\\n$CURRENT_PLAN_STR\\n\\nAction Taken:\\n$LAST_ACTION_TAKEN\\n\\nResult of Action:\\n$LAST_ACTION_RESULT"
 
         PAYLOAD=$(prepare_payload "evaluate" "$evaluator_input_prompt")
         if [ $? -ne 0 ]; then log_message "Error" "Failed to prepare payload for EVALUATION phase."; task_status="TASK_FAILED"; break; fi
@@ -1030,12 +1047,14 @@ handle_task() {
                 ;;
             CONTINUE_PLAN)
                 log_message "Eval Agent" "Evaluator: CONTINUE_PLAN. $EVALUATOR_MESSAGE"
-                CURRENT_STEP_INDEX=$((CURRENT_STEP_INDEX + 1))
+                # Request the next instruction from the Plan Agent for the next iteration
+                current_context_for_llm="Original request: '$initial_user_prompt'. The previous instruction ('$CURRENT_INSTRUCTION') resulted in: '$LAST_ACTION_RESULT'. Evaluator feedback: '$EVALUATOR_MESSAGE'. Please provide the next instruction based on the updated checklist."
+                CURRENT_PLAN_STR="" # Force the planner to re-plan with next instruction 
                 USER_CLARIFICATION_RESPONSE="" 
                 ;;
             REVISE_PLAN)
                 log_message "Eval Agent" "Evaluator: REVISE_PLAN. Reason: $EVALUATOR_MESSAGE"
-                current_context_for_llm="Original request: '$initial_user_prompt'. The previous plan step ('$current_step_detail') resulted in: '$LAST_ACTION_RESULT'. Evaluator suggests revision: '$EVALUATOR_MESSAGE'. Please provide a new plan."
+                current_context_for_llm="Original request: '$initial_user_prompt'. The previous instruction ('$CURRENT_INSTRUCTION') resulted in: '$LAST_ACTION_RESULT'. Evaluator suggests revision: '$EVALUATOR_MESSAGE'. Please revise your checklist and provide a new instruction."
                 CURRENT_PLAN_STR="" 
                 USER_CLARIFICATION_RESPONSE=""
                 ;;
@@ -1044,7 +1063,7 @@ handle_task() {
                 log_message "Eval Agent" "[Evaluator Clarification]: $CLARIFICATION_QUESTION"
                 printf "${CLR_GREEN}Eval Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
                 read -r USER_CLARIFICATION_RESPONSE
-                current_context_for_llm="Original request: '$initial_user_prompt'. After action '$LAST_ACTION_TAKEN' (result: '$LAST_ACTION_RESULT'), evaluator needs clarification. Question asked: '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please generate a new plan or determine next step based on this clarification."
+                current_context_for_llm="Original request: '$initial_user_prompt'. After action '$LAST_ACTION_TAKEN' (result: '$LAST_ACTION_RESULT'), evaluator needs clarification. Question asked: '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please revise your checklist and provide a new instruction based on this clarification."
                 CURRENT_PLAN_STR="" 
                 ;;
             *)
