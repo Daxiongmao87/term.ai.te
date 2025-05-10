@@ -126,7 +126,7 @@ done
 # *   Do NOT provide any explanations or text outside of this \`\`\`agent_command ... \`\`\` block when issuing a command.
 
 # --- Configuration Variables ---
-CONFIG_DIR="$HOME/.config/bash-agent" # Changed to use local ./config directory
+CONFIG_DIR="$HOME/.config/agent-shelly" # Changed to use local ./config directory
 
 log_message Debug "Preparing to set CONFIG_FILE. CONFIG_DIR='${CONFIG_DIR}'"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
@@ -918,9 +918,9 @@ handle_task() {
 
             DECISION_FROM_PLANNER=$(parse_llm_decision "$LLM_RESPONSE_CONTENT")
             if [[ "$DECISION_FROM_PLANNER" == CLARIFY_USER:* ]]; then
-                CLARIFICATION_QUESTION="${DECISION_FROM_PLANNER#CLARIFY_USER: }"
-                log_message "Plan Agent" "[Planner Clarification]: $CLARIFICATION_QUESTION"
                 if [[ "$ALLOW_CLARIFYING_QUESTIONS" == "true" ]]; then
+                    CLARIFICATION_QUESTION="${DECISION_FROM_PLANNER#CLARIFY_USER: }"
+                    log_message "Plan Agent" "[Planner Clarification]: $CLARIFICATION_QUESTION"
                     printf "${CLR_GREEN}Plan Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
                     read -r USER_CLARIFICATION_RESPONSE
                     current_context_for_llm="Original request: '$initial_user_prompt'. My previous question (from Planner): '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please generate a new plan based on this clarification."
@@ -928,8 +928,13 @@ handle_task() {
                     CURRENT_PLAN_STR="" 
                     continue 
                 else
-                    log_message "Warning" "Clarifying questions are disabled. Skipping Planner's clarification request."
-                    task_status="TASK_FAILED"; break;
+                    # When questions are disabled, we force a plan revision without asking the user
+                    log_message "Warning" "Plan Agent attempted to ask a clarifying question when questions are disabled: '${DECISION_FROM_PLANNER#CLARIFY_USER: }'"
+                    log_message "System" "Forcing Plan Agent to continue without asking the question"
+                    current_context_for_llm="Original request: '$initial_user_prompt'. IMPORTANT: Clarifying questions are disabled. You attempted to ask: '${DECISION_FROM_PLANNER#CLARIFY_USER: }'. You must not ask questions. Instead, make reasonable assumptions and continue with a complete plan. Be resourceful and continue without user input."
+                    LAST_EVAL_DECISION_TYPE="REVISE_PLAN"
+                    CURRENT_PLAN_STR="" 
+                    continue
                 fi
             fi
             
