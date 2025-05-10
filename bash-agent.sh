@@ -342,6 +342,42 @@ else
 fi
 rm -f "$yq_keys_stderr_file"
 
+# Load blacklisted_commands into an associative array for key checking
+declare -A BLACKLISTED_COMMAND_CHECK_MAP # Declare the blacklist map
+log_message Debug "Attempting to populate BLACKLISTED_COMMAND_CHECK_MAP from $CONFIG_FILE"
+
+yq_blacklist_stderr_file=$(mktemp)
+temp_blacklist_array=()
+
+# Get raw blacklisted keys, one per line
+# This approach handles both formats:
+# 1. blacklisted_commands:
+#      cmd1: "description" 
+#      cmd2: "description"
+# 2. blacklisted_commands:
+#      - cmd1
+#      - cmd2
+if ! mapfile -t temp_blacklist_array < <((cat "$CONFIG_FILE" | yq -r '.blacklisted_commands | keys | .[]' 2> "$yq_blacklist_stderr_file") || (cat "$CONFIG_FILE" | yq -r '.blacklisted_commands[]' 2> /dev/null)); then
+    log_message "Warning" "Failed to read blacklisted command keys using yq and mapfile."
+    if [ -s "$yq_blacklist_stderr_file" ]; then
+        log_message "Warning" "yq stderr (blacklist keys): $(cat "$yq_blacklist_stderr_file")"
+    fi
+    log_message Warning "BLACKLISTED_COMMAND_CHECK_MAP will be empty."
+else
+    if [ ${#temp_blacklist_array[@]} -eq 0 ]; then
+        log_message Debug "No blacklisted commands found in $CONFIG_FILE. BLACKLISTED_COMMAND_CHECK_MAP will be empty."
+    else
+        for key in "${temp_blacklist_array[@]}"; do
+            if [ -n "$key" ]; then
+                BLACKLISTED_COMMAND_CHECK_MAP["$key"]=1
+                log_message Debug "Added blacklisted command key to map: '$key'"
+            fi
+        done
+        log_message Debug "BLACKLISTED_COMMAND_CHECK_MAP population complete. Count: ${#BLACKLISTED_COMMAND_CHECK_MAP[@]}"
+    fi
+fi
+rm -f "$yq_blacklist_stderr_file"
+
 OPERATION_MODE=$(read_yq_value ".operation_mode" "// \"normal\"")
 if [[ "$OPERATION_MODE" != "normal" && "$OPERATION_MODE" != "gremlin" && "$OPERATION_MODE" != "goblin" ]]; then
     log_message "Error" "OPERATION_MODE in $CONFIG_FILE must be 'normal', 'gremlin', or 'goblin', got '$OPERATION_MODE'."
@@ -939,47 +975,107 @@ handle_task() {
                 LAST_ACTION_TAKEN="Internal command: report_task_completion"
                 LAST_ACTION_RESULT="Task marked as complete by Evaluator."
             else
-                local base_suggested_cmd=$(echo "$SUGGESTED_CMD" | awk '{print $1}')
+                # Update to handle command separators (&&, ||, ;, |, &, etc.)
+                log_message "Debug" "Checking command permissions for: $SUGGESTED_CMD"
+                
+                # Function to check command permission
+                check_cmd_permission() {
+                    local cmd_to_check="$1"
+                    local base_cmd=$(echo "$cmd_to_check" | awk '{print $1}')
+                    
+                    log_message "Debug" "Checking base command: $base_cmd from $cmd_to_check"
+                    
+                    if [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_cmd"] || -n "${ALLOWED_COMMAND_CHECK_MAP[$base_cmd]-}" ]]; then
+                        return 0  # Allowed
+                    elif [[ -v BLACKLISTED_COMMAND_CHECK_MAP["$base_cmd"] || -n "${BLACKLISTED_COMMAND_CHECK_MAP[$base_cmd]-}" ]]; then
+                        return 2  # Blacklisted
+                    else
+                        return 1  # Not allowed
+                    fi
+                }
+                
+                # Split command by separators and check each part
+                local all_parts_allowed=true
+                local no_blacklisted_parts=true
+                local parts_to_check=()
+                
+                # Use sed to replace separators with newlines, then check each line
+                while IFS= read -r part; do
+                    part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    if [ -n "$part" ]; then
+                        parts_to_check+=("$part")
+                    fi
+                done < <(echo "$SUGGESTED_CMD" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|[^|]/\n|/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                
+                log_message "Debug" "Command parts to check: ${parts_to_check[*]}"
+                
+                local disallowed_cmds=()
+                local blacklisted_cmds=()
+                for part in "${parts_to_check[@]}"; do
+                    local actual_cmd=$(echo "$part" | awk '{print $1}')
+                    # Check if it is an actual command using `which`
+                    if ! command -v "$actual_cmd" &> /dev/null && ! "$(which "$actual_cmd" &> /dev/null)"; then
+                        log_message "Debug" "Command '$actual_cmd' not found in PATH. Skipping check."
+                        continue
+                    fi
+                    
+                    # First check if command is blacklisted (priority over allowed)
+                    if [[ -v BLACKLISTED_COMMAND_CHECK_MAP["$actual_cmd"] || -n "${BLACKLISTED_COMMAND_CHECK_MAP[$actual_cmd]-}" ]]; then
+                        no_blacklisted_parts=false
+                        blacklisted_cmds+=("$actual_cmd")
+                    # Then check if command is allowed
+                    elif [[ ! -v ALLOWED_COMMAND_CHECK_MAP["$actual_cmd"] && -z "${ALLOWED_COMMAND_CHECK_MAP[$actual_cmd]-}" ]]; then
+                        all_parts_allowed=false
+                        disallowed_cmds+=("$actual_cmd")
+                    fi
+                done
+                
                 local execute_this_command=false
-
-                if [[ "$OPERATION_MODE" == "goblin" ]]; then # Goblin mode: always allow
-                    log_message "System" "Goblin Mode: Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is automatically allowed."
+                
+                # First check for blacklisted commands - these are always denied regardless of mode
+                if [ "$no_blacklisted_parts" = false ]; then
+                    log_message "System" "Some command parts from '$SUGGESTED_CMD' are BLACKLISTED: ${blacklisted_cmds[*]}"
+                    CMD_OUTPUT="Command '$SUGGESTED_CMD' contains blacklisted commands: ${blacklisted_cmds[*]}. Blacklisted commands are never allowed."
+                    CMD_STATUS=1 # Specific code for blacklist denial
+                    LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied due to blacklist."
+                    execute_this_command=false
+                # If no blacklisted commands, proceed with normal command check logic
+                elif [ "$all_parts_allowed" = true ]; then
+                    log_message "System" "All command parts from '$SUGGESTED_CMD' are allowed by existing config."
                     execute_this_command=true
-                elif [[ -v ALLOWED_COMMAND_CHECK_MAP["$base_suggested_cmd"] || -n "${ALLOWED_COMMAND_CHECK_MAP[$base_suggested_cmd]-}" ]]; then # Normal and Gremlin whitelisted
-                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is allowed by existing config."
-                    execute_this_command=true
-                else # Not whitelisted, applies to Normal (reject) and Gremlin (prompt)
-                    log_message "System" "Command '$base_suggested_cmd' from '$SUGGESTED_CMD' is NOT in allowed commands."
-                    if [[ "$OPERATION_MODE" == "gremlin" ]]; then # Gremlin: prompt for non-whitelisted
-                        log_message "System" "Gremlin Mode: Dynamic command approval. Requesting user permission for '$base_suggested_cmd'."
-                        prompt_for_command_permission_and_update_config "$base_suggested_cmd"
-                        local permission_status=$?
-
-                        case "$permission_status" in
-                            0) # Allowed (either 'yes' or 'always' succeeded)
-                                log_message "System" "Permission granted for '$base_suggested_cmd'."
-                                execute_this_command=true
-                                ;;
-                            1) # Denied
-                                log_message "System" "Permission denied for '$base_suggested_cmd'."
-                                CMD_OUTPUT="Command '$base_suggested_cmd' was denied by the user for this instance."
-                                CMD_STATUS=1 #  Specific code for user denial
-                                LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied by user."
-                                execute_this_command=false
-                                # Don't set task_status to TASK_FAILED here - let Evaluation Agent decide if this is critical
-                                ;;
-                            2) # Cancel task
-                                log_message "System" "Task cancelled by user due to command permission choice for '$base_suggested_cmd'."
-                                task_status="TASK_FAILED" # This will break the main loop after this iteration's EVAL
-                                CMD_OUTPUT="Task cancelled by user at command permission prompt for '$base_suggested_cmd'."
-                                CMD_STATUS=125 # Arbitrary non-zero for cancellation
-                                LAST_ACTION_TAKEN="Task cancelled by user over command '$SUGGESTED_CMD'."
-                                execute_this_command=false
-                                ;;
-                        esac
-                    else # Normal mode: reject non-whitelisted (Goblin and Gremlin already handled)
-                        log_message "System" "Normal Mode: Command '$base_suggested_cmd' not in allowed_commands. Rejected."
-                        CMD_OUTPUT="Command '$base_suggested_cmd' is not in allowed_commands and operation mode is 'normal'."
+                else
+                    log_message "System" "Some command parts from '$SUGGESTED_CMD' are NOT in allowed commands: ${disallowed_cmds[*]}"
+                    if [[ "$OPERATION_MODE" == "gremlin" ]]; then
+                        # In Gremlin mode, prompt for each disallowed command
+                        for disallowed_cmd in "${disallowed_cmds[@]}"; do
+                            log_message "System" "Gremlin Mode: Dynamic command approval. Requesting user permission for '$disallowed_cmd'."
+                            prompt_for_command_permission_and_update_config "$disallowed_cmd"
+                            local permission_status=$?
+                            case "$permission_status" in
+                                0) # Allowed (either 'yes' or 'always' succeeded)
+                                    log_message "System" "Permission granted for '$disallowed_cmd'."
+                                    execute_this_command=true
+                                    ;;
+                                1) # Denied
+                                    log_message "System" "Permission denied for '$disallowed_cmd'."
+                                    CMD_OUTPUT="Command '$disallowed_cmd' was denied by the user for this instance."
+                                    CMD_STATUS=1 # Specific code for user denial
+                                    LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied by user."
+                                    execute_this_command=false
+                                    ;;
+                                2) # Cancel task
+                                    log_message "System" "Task cancelled by user due to command permission choice for '$disallowed_cmd'."
+                                    task_status="TASK_FAILED" # This will break the main loop after this iteration's EVAL
+                                    CMD_OUTPUT="Task cancelled by user at command permission prompt for '$disallowed_cmd'."
+                                    CMD_STATUS=125 # Arbitrary non-zero for cancellation
+                                    LAST_ACTION_TAKEN="Task cancelled by user over command '$SUGGESTED_CMD'."
+                                    execute_this_command=false
+                                    ;;
+                            esac
+                        done
+                    else # Normal mode: reject non-whitelisted
+                        log_message "System" "Normal Mode: Command '$SUGGESTED_CMD' not in allowed_commands. Rejected."
+                        CMD_OUTPUT="Command '$SUGGESTED_CMD' is not in allowed_commands and operation mode is 'normal'."
                         CMD_STATUS=1 # Indicate failure/denial
                         LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied (not whitelisted, mode: normal)."
                         execute_this_command=false
