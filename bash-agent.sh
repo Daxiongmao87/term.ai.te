@@ -348,6 +348,13 @@ if [[ "$OPERATION_MODE" != "normal" && "$OPERATION_MODE" != "gremlin" && "$OPERA
     exit 1
 fi
 
+ALLOW_CLARIFYING_QUESTIONS=$(read_yq_value ".allow_clarifying_questions" "// true")
+if [[ "$ALLOW_CLARIFYING_QUESTIONS" != "true" && "$ALLOW_CLARIFYING_QUESTIONS" != "false" ]]; then
+    log_message "Warning" "ALLOW_CLARIFYING_QUESTIONS in $CONFIG_FILE must be 'true' or 'false', got '$ALLOW_CLARIFYING_QUESTIONS'. Defaulting to 'true'."
+    ALLOW_CLARIFYING_QUESTIONS="true"
+fi
+log_message Debug "ALLOW_CLARIFYING_QUESTIONS set to: $ALLOW_CLARIFYING_QUESTIONS"
+
 COMMAND_TIMEOUT=$(read_yq_value ".command_timeout" "// 30")
 if ! [[ "$COMMAND_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$COMMAND_TIMEOUT" -lt 0 ]; then # Allow 0 for no timeout if desired, though >=1 is typical
     log_message "Error" "COMMAND_TIMEOUT ('$COMMAND_TIMEOUT') in $CONFIG_FILE must be a non-negative integer."
@@ -462,6 +469,39 @@ prepare_payload() {
             return 1
             ;;
     esac
+
+    # Process template variables in system prompts
+    # Replace {{if ALLOW_CLARIFYING_QUESTIONS}}...{{else}}...{{end}} patterns
+    if [[ "$ALLOW_CLARIFYING_QUESTIONS" == "true" ]]; then
+        # Keep the "if" part and remove the "else" part in if/else/end blocks
+        system_prompt_for_phase=$(echo "$system_prompt_for_phase" | sed -E '
+            # Match the if/else/end block and capture relevant parts
+            /\{\{if ALLOW_CLARIFYING_QUESTIONS\}\}/,/\{\{end\}\}/ {
+                # Delete else to end part
+                /\{\{else\}\}/,/\{\{end\}\}/d
+                # Remove the if tag
+                s/\{\{if ALLOW_CLARIFYING_QUESTIONS\}\}//g
+            }
+        ')
+    else
+        # Keep the "else" part and remove the "if" part in if/else/end blocks
+        system_prompt_for_phase=$(echo "$system_prompt_for_phase" | sed -E '
+            # For blocks with else, remove if to else
+            /\{\{if ALLOW_CLARIFYING_QUESTIONS\}\}/,/\{\{else\}\}/ {
+                /\{\{else\}\}/! d
+                s/\{\{else\}\}//g
+            }
+            # Remove end tags
+            s/\{\{end\}\}//g
+        ')
+    fi
+    
+    # Clean up any remaining template markers
+    system_prompt_for_phase=$(echo "$system_prompt_for_phase" | sed -E '
+        s/\{\{if ALLOW_CLARIFYING_QUESTIONS\}\}//g
+        s/\{\{else\}\}//g
+        s/\{\{end\}\}//g
+    ')
 
     local tool_instructions_addendum=""
 
@@ -828,12 +868,17 @@ handle_task() {
             if [[ "$DECISION_FROM_PLANNER" == CLARIFY_USER:* ]]; then
                 CLARIFICATION_QUESTION="${DECISION_FROM_PLANNER#CLARIFY_USER: }"
                 log_message "Plan Agent" "[Planner Clarification]: $CLARIFICATION_QUESTION"
-                printf "${CLR_GREEN}Plan Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
-                read -r USER_CLARIFICATION_RESPONSE
-                current_context_for_llm="Original request: '$initial_user_prompt'. My previous question (from Planner): '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please generate a new plan based on this clarification."
-                LAST_EVAL_DECISION_TYPE="PLANNER_CLARIFY" 
-                CURRENT_PLAN_STR="" 
-                continue 
+                if [[ "$ALLOW_CLARIFYING_QUESTIONS" == "true" ]]; then
+                    printf "${CLR_GREEN}Plan Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
+                    read -r USER_CLARIFICATION_RESPONSE
+                    current_context_for_llm="Original request: '$initial_user_prompt'. My previous question (from Planner): '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please generate a new plan based on this clarification."
+                    LAST_EVAL_DECISION_TYPE="PLANNER_CLARIFY" 
+                    CURRENT_PLAN_STR="" 
+                    continue 
+                else
+                    log_message "Warning" "Clarifying questions are disabled. Skipping Planner's clarification request."
+                    task_status="TASK_FAILED"; break;
+                fi
             fi
             
             CURRENT_PLAN_STR=$(parse_llm_plan "$LLM_RESPONSE_CONTENT")
@@ -921,6 +966,7 @@ handle_task() {
                                 CMD_STATUS=1 #  Specific code for user denial
                                 LAST_ACTION_TAKEN="Command '$SUGGESTED_CMD' denied by user."
                                 execute_this_command=false
+                                # Don't set task_status to TASK_FAILED here - let Evaluation Agent decide if this is critical
                                 ;;
                             2) # Cancel task
                                 log_message "System" "Task cancelled by user due to command permission choice for '$base_suggested_cmd'."
@@ -1061,10 +1107,15 @@ handle_task() {
             CLARIFY_USER)
                 CLARIFICATION_QUESTION="$EVALUATOR_MESSAGE"
                 log_message "Eval Agent" "[Evaluator Clarification]: $CLARIFICATION_QUESTION"
-                printf "${CLR_GREEN}Eval Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
-                read -r USER_CLARIFICATION_RESPONSE
-                current_context_for_llm="Original request: '$initial_user_prompt'. After action '$LAST_ACTION_TAKEN' (result: '$LAST_ACTION_RESULT'), evaluator needs clarification. Question asked: '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please revise your checklist and provide a new instruction based on this clarification."
-                CURRENT_PLAN_STR="" 
+                if [[ "$ALLOW_CLARIFYING_QUESTIONS" == "true" ]]; then
+                    printf "${CLR_GREEN}Eval Agent asks: ${CLR_RESET}${CLR_BOLD_GREEN}%s${CLR_RESET} " "$CLARIFICATION_QUESTION"
+                    read -r USER_CLARIFICATION_RESPONSE
+                    current_context_for_llm="Original request: '$initial_user_prompt'. After action '$LAST_ACTION_TAKEN' (result: '$LAST_ACTION_RESULT'), evaluator needs clarification. Question asked: '$CLARIFICATION_QUESTION'. User's answer: '$USER_CLARIFICATION_RESPONSE'. Please revise your checklist and provide a new instruction based on this clarification."
+                    CURRENT_PLAN_STR="" 
+                else
+                    log_message "Warning" "Clarifying questions are disabled. Skipping Evaluator's clarification request."
+                    task_status="TASK_FAILED"; break;
+                fi
                 ;;
             *)
                 log_message "Error" "Unknown decision from Evaluator: '$EVALUATOR_DECISION_FULL'. Assuming task failed."
