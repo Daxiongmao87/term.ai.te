@@ -1,11 +1,12 @@
 """Task handler with Plan-Act-Evaluate loop for termaite."""
 
+import re
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
 from ..utils.logging import logger
-from ..llm import create_llm_client, create_payload_builder, parse_llm_plan, parse_llm_instruction, parse_llm_decision, parse_llm_thought, parse_suggested_command
+from ..llm import create_llm_client, create_payload_builder, parse_llm_plan, parse_llm_instruction, parse_llm_decision, parse_llm_thought, parse_suggested_command, parse_llm_summary
 from ..commands import create_command_executor, create_permission_manager, create_safety_checker
 from ..constants import CLR_GREEN, CLR_RESET, CLR_BOLD_GREEN
 
@@ -37,6 +38,11 @@ class TaskState:
     user_clarification: str = ""
     last_eval_decision: str = ""
     iteration: int = 0
+    
+    # Agent summaries for inter-agent coordination
+    planner_summary: str = ""
+    actor_summary: str = ""
+    evaluator_summary: str = ""
     
     def __post_init__(self):
         if self.plan_array is None:
@@ -120,6 +126,8 @@ class TaskHandler:
         # Return final result
         if task_status == TaskStatus.COMPLETED:
             logger.user("Task completed successfully.")
+            # Generate completion summary
+            self._generate_completion_summary(user_prompt, state)
             return True
         else:
             logger.user("Task failed or was aborted.")
@@ -171,6 +179,11 @@ class TaskHandler:
         state.current_plan = parse_llm_plan(response)
         state.current_instruction = parse_llm_instruction(response)
         
+        # Extract planner summary for inter-agent coordination
+        state.planner_summary = parse_llm_summary(response)
+        if state.planner_summary:
+            logger.plan_agent(f"[Planner Summary]: {state.planner_summary}")
+        
         # Validate plan and instruction
         if not state.current_plan:
             logger.warning("Planner did not return a checklist")
@@ -218,6 +231,11 @@ class TaskHandler:
         thought = parse_llm_thought(response)
         if thought:
             logger.action_agent(f"[Actor Thought]: {thought}")
+        
+        # Extract actor summary for inter-agent coordination
+        state.actor_summary = parse_llm_summary(response)
+        if state.actor_summary:
+            logger.action_agent(f"[Actor Summary]: {state.actor_summary}")
         
         suggested_command = parse_suggested_command(response)
         
@@ -329,6 +347,11 @@ class TaskHandler:
         if thought:
             logger.eval_agent(f"[Evaluator Thought]: {thought}")
         
+        # Extract evaluator summary for inter-agent coordination
+        state.evaluator_summary = parse_llm_summary(response)
+        if state.evaluator_summary:
+            logger.eval_agent(f"[Evaluator Summary]: {state.evaluator_summary}")
+        
         decision = parse_llm_decision(response)
         if not decision:
             logger.warning("Evaluator: no decision. Assuming CONTINUE_PLAN")
@@ -347,7 +370,7 @@ class TaskHandler:
     def _process_evaluation_decision(self, decision_type: str, message: str, state: TaskState) -> tuple[TaskStatus, str]:
         """Process the evaluator's decision and return next status and context."""
         if decision_type == "TASK_COMPLETE":
-            logger.eval_agent(f"Task marked COMPLETE by evaluator. Summary: {message}")
+            logger.eval_agent(f"Task marked COMPLETE by evaluator: {message}")
             return TaskStatus.COMPLETED, ""
         
         elif decision_type == "TASK_FAILED":
@@ -415,6 +438,11 @@ class TaskHandler:
             f"User's original request: '{original_prompt}'\n\n"
             f"Instruction to execute: '{state.current_instruction}'"
         )
+        
+        # Add planner summary for coordination
+        if state.planner_summary:
+            context += f"\n\nPlanner's Summary: {state.planner_summary}"
+        
         if state.user_clarification:
             context += f"\n\nContext: User responded '{state.user_clarification}' to my last question."
             state.user_clarification = ""  # Clear after use
@@ -429,10 +457,59 @@ class TaskHandler:
             f"Action Taken by Actor:\n{state.last_action_taken}\n\n"
             f"Result of Action:\n{state.last_action_result}"
         )
+        
+        # Add agent summaries for coordination
+        if state.planner_summary:
+            context += f"\n\nPlanner's Summary: {state.planner_summary}"
+        if state.actor_summary:
+            context += f"\n\nActor's Summary: {state.actor_summary}"
+        
         if state.user_clarification:
             context += f"\n\nContext: User responded '{state.user_clarification}' to my last question."
             state.user_clarification = ""  # Clear after use
         return context
+    
+    def _generate_completion_summary(self, original_prompt: str, state: TaskState):
+        """Generate and display a completion summary after task success."""
+        logger.system("Generating task completion summary...")
+        
+        # Build context for summary generation
+        context_history = self.config_manager.get_current_session_context()
+        summary_context = (
+            f"Original User Request: '{original_prompt}'\n\n"
+            f"Task Execution History:\n{context_history}\n\n"
+            f"Final Task State:\n"
+            f"- Plan: {state.current_plan}\n"
+            f"- Last Action: {state.last_action_taken}\n"
+            f"- Result: {state.last_action_result}\n"
+            f"- Total Iterations: {state.iteration}"
+        )
+        
+        # Get completion summary from LLM
+        payload = self.payload_builder.prepare_payload("completion_summary", summary_context)
+        if not payload:
+            logger.warning("Failed to prepare payload for completion summary")
+            return
+            
+        response = self.llm_client.send_request(payload)
+        if not response:
+            logger.warning("No response from LLM for completion summary")
+            return
+            
+        # Parse and display the summary
+        try:
+            # Extract the summary content from between <summary> tags
+            import re
+            summary_match = re.search(r'<summary>(.*?)</summary>', response, re.DOTALL)
+            if summary_match:
+                summary_content = summary_match.group(1).strip()
+                print(f"\n{summary_content}\n")
+            else:
+                # If no summary tags, just display the response directly
+                print(f"\n## Task Completion Summary\n{response}\n")
+        except Exception as e:
+            logger.warning(f"Error parsing completion summary: {e}")
+            print(f"\n## Task Completion Summary\n{response}\n")
 
 
 def create_task_handler(config: Dict[str, Any], config_manager) -> TaskHandler:

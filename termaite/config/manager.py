@@ -300,6 +300,63 @@ class ConfigManager:
                 Path(temp_name).unlink()
             return False
 
+    def get_current_session_context(self) -> str:
+        """Get the context history for the current working directory session.
+        
+        Returns:
+            Formatted string of the session interaction history
+        """
+        context_file = self.config_dir / "context.json"
+        if not context_file.exists():
+            return "No interaction history available."
+            
+        pwd_hash = hashlib.sha256(os.getcwd().encode('utf-8')).hexdigest()
+        
+        try:
+            with open(context_file, 'r') as f:
+                context_data = json.load(f)
+                
+            if pwd_hash not in context_data or not isinstance(context_data[pwd_hash], list):
+                return "No interaction history for current directory."
+                
+            session_entries = context_data[pwd_hash]
+            if not session_entries:
+                return "No interaction history for current directory."
+            
+            # Format the interaction history
+            formatted_history = []
+            for i, entry in enumerate(session_entries, 1):
+                timestamp = entry.get("timestamp", "Unknown time")
+                user_prompt = entry.get("user_prompt", "")
+                entry_type = entry.get("type", "unknown")
+                
+                if entry_type == "success" and "llm_full_response" in entry:
+                    # Extract the response content if it's JSON
+                    try:
+                        response = entry["llm_full_response"]
+                        if isinstance(response, dict):
+                            # Try to get the actual text content from common LLM response formats
+                            content = (response.get("response") or 
+                                     response.get("content") or 
+                                     response.get("text") or 
+                                     str(response))
+                        else:
+                            content = str(response)
+                    except Exception:
+                        content = str(entry["llm_full_response"])
+                else:
+                    content = entry.get("llm_error_message", "Error occurred")
+                
+                formatted_history.append(f"=== Interaction {i} ({timestamp}) ===")
+                formatted_history.append(f"Input: {user_prompt}")
+                formatted_history.append(f"Response: {content[:500]}..." if len(content) > 500 else f"Response: {content}")
+                formatted_history.append("")
+            
+            return "\n".join(formatted_history)
+            
+        except Exception as e:
+            logger.error(f"Error reading context history: {e}")
+            return "Error retrieving interaction history."
 
 def create_config_manager(config_dir: Optional[Path] = None) -> ConfigManager:
     """Create and initialize a configuration manager.

@@ -36,6 +36,12 @@ def parse_llm_decision(llm_output: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def parse_llm_summary(llm_output: str) -> str:
+    """Extract the LLM's summary from <summary> tags."""
+    match = re.search(r"<summary>(.*?)</summary>", llm_output, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
 def extract_decision_type_and_message(decision_text: str) -> tuple[str, str]:
     """Extract decision type and message from decision text.
     

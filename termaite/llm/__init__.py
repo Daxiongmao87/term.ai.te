@@ -8,6 +8,7 @@ from .parsers import (
     parse_llm_plan,
     parse_llm_instruction,
     parse_llm_decision,
+    parse_llm_summary,
     extract_decision_type_and_message,
     parse_checklist_items,
     extract_response_content

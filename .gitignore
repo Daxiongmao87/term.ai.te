@@ -35,7 +35,8 @@ venv/
 env/
 ENV/
 
-# Test artifacts and temporary files
+# Test directory and artifacts
+test/
 *_test.txt
 *_output.txt
 test_*.sh

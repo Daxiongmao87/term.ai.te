@@ -62,7 +62,8 @@ class PayloadBuilder:
         phase_map = {
             "plan": self.config.get("plan_prompt", ""),
             "action": self.config.get("action_prompt", ""),
-            "evaluate": self.config.get("evaluate_prompt", "")
+            "evaluate": self.config.get("evaluate_prompt", ""),
+            "completion_summary": self.config.get("completion_summary_prompt", "")
         }
         
         if phase not in phase_map:
