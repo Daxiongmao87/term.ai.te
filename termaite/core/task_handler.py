@@ -428,6 +428,19 @@ class TaskHandler:
                 logger.system("Task FAILED: evaluator needs clarification, questions disabled")
                 return TaskStatus.FAILED, ""
         
+        elif decision_type == "VERIFY_ACTION":
+            logger.eval_agent(f"Evaluator requests verification: {message}")
+            # Set the verification command as the next instruction
+            verification_context = (
+                f"Original request: '{state.current_instruction}'.\n"
+                f"Previous action: '{state.last_action_taken}' (result: '{state.last_action_result}').\n"
+                f"Evaluator needs verification. Execute this command to verify the outcome: {message}"
+            )
+            # Keep the same plan but set verification as next instruction
+            state.current_instruction = f"Execute verification command: {message}"
+            state.user_clarification = ""
+            return TaskStatus.IN_PROGRESS, verification_context
+        
         else:
             logger.error(f"Unknown decision from Evaluator: '{decision}'. Assuming task failed")
             return TaskStatus.FAILED, ""
