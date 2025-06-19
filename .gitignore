@@ -34,3 +34,14 @@ wheels/
 venv/
 env/
 ENV/
+
+# Test artifacts and temporary files
+*_test.txt
+*_output.txt
+test_*.sh
+*_hello.sh
+rainbow_*.sh
+goblin_*.txt
+*.log
+temp_*
+test_temp_*
