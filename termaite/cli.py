@@ -18,12 +18,16 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  termaite "list all python files in the current directory"
-  termaite "create a backup of my documents folder"
+  termaite "what is the best programming language"  # Simple response mode (default)
+  termaite "take me to my home directory"           # Simple response with command
+  termaite -a "create a backup of my documents"     # Agentic mode (multi-step)
   termaite --debug "find all large files over 100MB"
   termaite  # Interactive mode
 
 Operation Modes:
+  Simple  - Direct LLM response with optional commands (default)
+  Agentic - Plan-Act-Evaluate multi-agent architecture (use -a or -t flag)
+  
   normal  - Allowed commands require confirmation, others are blocked
   gremlin - Allowed commands run automatically, others prompt for permission
   goblin  - All commands run without confirmation (USE WITH CAUTION!)
@@ -34,6 +38,18 @@ Operation Modes:
         'task_prompt',
         nargs='*',
         help="Initial task description. If empty, enters interactive mode."
+    )
+    
+    parser.add_argument(
+        '-a', '--agentic',
+        action='store_true',
+        help="Enable agentic mode (Plan-Act-Evaluate multi-agent architecture)"
+    )
+    
+    parser.add_argument(
+        '-t', '--task',
+        action='store_true',
+        help="Enable task mode (alias for agentic mode)"
     )
     
     parser.add_argument(
@@ -74,6 +90,9 @@ def main(args: Optional[List[str]] = None) -> None:
     
     # Initialize the application
     try:
+        # Determine if agentic mode is requested
+        agentic_mode = parsed_args.agentic or parsed_args.task
+        
         app = create_application(
             config_dir=parsed_args.config_dir,
             debug=parsed_args.debug
@@ -94,11 +113,11 @@ def main(args: Optional[List[str]] = None) -> None:
     if parsed_args.task_prompt:
         # Command-line mode: execute the given task
         user_task = " ".join(parsed_args.task_prompt)
-        success = app.run_single_task(user_task)
+        success = app.run_single_task(user_task, agentic_mode=agentic_mode)
         sys.exit(0 if success else 1)
     else:
         # Interactive mode
-        app.run_interactive_mode()
+        app.run_interactive_mode(agentic_mode=agentic_mode)
     
     logger.system("termaite session ended.")
 

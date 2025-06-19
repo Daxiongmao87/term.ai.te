@@ -63,7 +63,8 @@ class PayloadBuilder:
             "plan": self.config.get("plan_prompt", ""),
             "action": self.config.get("action_prompt", ""),
             "evaluate": self.config.get("evaluate_prompt", ""),
-            "completion_summary": self.config.get("completion_summary_prompt", "")
+            "completion_summary": self.config.get("completion_summary_prompt", ""),
+            "simple": self.config.get("simple_prompt", "")
         }
         
         if phase not in phase_map:
@@ -74,7 +75,7 @@ class PayloadBuilder:
     
     def _get_tool_instructions(self, phase: str) -> str:
         """Get tool instructions addendum for the given phase."""
-        if phase != "action":
+        if phase not in ["action", "simple"]:
             return ""
         
         operation_mode = self.config.get("operation_mode", "normal")

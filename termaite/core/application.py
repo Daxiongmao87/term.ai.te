@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..config.manager import create_config_manager
 from ..core.task_handler import create_task_handler
+from ..core.simple_handler import create_simple_handler
 from ..utils.logging import logger
 from ..utils.helpers import check_dependencies
 from ..constants import CLR_BOLD_RED, CLR_RESET
@@ -40,25 +41,32 @@ class TermAIte:
         # Check dependencies
         check_dependencies()
         
-        # Initialize task handler
+        # Initialize task handler and simple handler
         self.task_handler = create_task_handler(self.config, self.config_manager)
+        self.simple_handler = create_simple_handler(self.config, self.config_manager)
         
         # Set up signal handlers
         self._setup_signal_handlers()
         
         logger.debug("Application initialization complete")
     
-    def handle_task(self, prompt: str) -> bool:
-        """Handle a user task through the Plan-Act-Evaluate loop.
+    def handle_task(self, prompt: str, agentic_mode: bool = False) -> bool:
+        """Handle a user task using either simple or agentic mode.
         
         Args:
             prompt: The user's task request
+            agentic_mode: If True, use Plan-Act-Evaluate loop; if False, use simple response
             
         Returns:
             True if task completed successfully, False otherwise
         """
         try:
-            return self.task_handler.handle_task(prompt)
+            if agentic_mode:
+                logger.system("Using agentic mode (Plan-Act-Evaluate)")
+                return self.task_handler.handle_task(prompt)
+            else:
+                logger.system("Using simple response mode")
+                return self.simple_handler.handle_simple_request(prompt)
         except KeyboardInterrupt:
             logger.system("Task interrupted by user")
             return False
@@ -66,9 +74,15 @@ class TermAIte:
             logger.error(f"Unexpected error during task handling: {e}")
             return False
     
-    def run_interactive_mode(self) -> None:
-        """Run the application in interactive mode."""
-        logger.system("Starting interactive mode. Type 'exit' or 'quit' to stop.")
+    def run_interactive_mode(self, agentic_mode: bool = False) -> None:
+        """Run the application in interactive mode.
+        
+        Args:
+            agentic_mode: Default mode for interactive session
+        """
+        mode_name = "agentic" if agentic_mode else "simple"
+        logger.system(f"Starting interactive mode ({mode_name}). Type 'exit', 'quit', or use Ctrl+C to stop.")
+        logger.system("Commands: -a <prompt> for agentic mode, -s <prompt> for simple mode")
         
         try:
             while True:
@@ -85,8 +99,23 @@ class TermAIte:
                     if not user_input:
                         continue
                     
+                    # Parse mode flags
+                    current_agentic_mode = agentic_mode
+                    prompt = user_input
+                    
+                    if user_input.startswith('-a '):
+                        current_agentic_mode = True
+                        prompt = user_input[3:].strip()
+                    elif user_input.startswith('-s '):
+                        current_agentic_mode = False
+                        prompt = user_input[3:].strip()
+                    
+                    if not prompt:
+                        logger.warning("Empty prompt after mode flag")
+                        continue
+                    
                     # Handle the task
-                    success = self.handle_task(user_input)
+                    success = self.handle_task(prompt, agentic_mode=current_agentic_mode)
                     
                     if not success:
                         logger.warning("Task did not complete successfully")
@@ -102,17 +131,19 @@ class TermAIte:
             logger.error(f"Error in interactive mode: {e}")
             sys.exit(1)
     
-    def run_single_task(self, task: str) -> bool:
+    def run_single_task(self, task: str, agentic_mode: bool = False) -> bool:
         """Run a single task and exit.
         
         Args:
             task: Task to execute
+            agentic_mode: Whether to use agentic or simple mode
             
         Returns:
             True if task completed successfully, False otherwise
         """
-        logger.system(f"Running single task: {task}")
-        return self.handle_task(task)
+        mode_name = "agentic" if agentic_mode else "simple"
+        logger.system(f"Running single task in {mode_name} mode: {task}")
+        return self.handle_task(task, agentic_mode=agentic_mode)
     
     def _setup_signal_handlers(self) -> None:
         """Set up signal handlers for graceful shutdown."""
