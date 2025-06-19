@@ -154,13 +154,9 @@ class SimpleHandler:
             result = self.command_executor.execute(command)
             
             if result.success:
-                if result.output:
-                    print(f"\n{result.output}")
                 logger.system(f"Command executed successfully (exit code: {result.exit_code})")
                 return True
             else:
-                if result.output:
-                    print(f"\n{result.output}")
                 logger.warning(f"Command failed with exit code: {result.exit_code}")
                 return False
                 
