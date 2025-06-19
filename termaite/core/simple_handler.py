@@ -44,8 +44,6 @@ class SimpleHandler:
         Returns:
             True if request handled successfully, False otherwise
         """
-        logger.user(f"Processing simple request: {user_prompt}")
-        
         # Get LLM response for simple mode
         payload = self.payload_builder.prepare_payload("simple", user_prompt)
         if not payload:
@@ -71,9 +69,8 @@ class SimpleHandler:
         # Extract the main response text (remove thought and command blocks)
         response_text = self._extract_response_text(response, thought, suggested_command)
         
-        # Display the response
+        # Display the response (without logging the raw response)
         if response_text:
-            logger.user(f"Response: {response_text}")
             print(f"\n{CLR_BOLD_GREEN}{response_text}{CLR_RESET}")
         
         # Handle command if present
@@ -93,13 +90,14 @@ class SimpleHandler:
         Returns:
             Clean response text for display
         """
+        import re
+        
         text = full_response
         
-        # Remove thought block
-        if thought:
-            text = text.replace(f"<think>{thought}</think>", "").strip()
+        # Remove think blocks using regex to handle variations
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
         
-        # Remove command block
+        # Remove command blocks
         if command:
             text = text.replace(f"```agent_command\n{command}\n```", "").strip()
             text = text.replace(f"```agent_command\n{command}```", "").strip()
@@ -108,6 +106,9 @@ class SimpleHandler:
         
         # Clean up any remaining artifacts
         text = text.replace("```agent_command", "").replace("```", "").strip()
+        
+        # Remove extra newlines and clean up whitespace
+        text = re.sub(r'\n\s*\n\s*\n', '\n\n', text).strip()
         
         return text
     

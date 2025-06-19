@@ -20,8 +20,6 @@ def check_dependencies() -> None:
     Checks for required Python libraries and some external CLI tools.
     CLI tools might be invoked by LLM-suggested commands or for getting command help.
     """
-    logger.system(f"Python version: {sys.version.split()[0]}")
-
     # Python library dependencies are checked at import time.
 
     # CLI tools that might be used by `subprocess` when executing LLM-suggested commands

@@ -25,7 +25,6 @@ class TermAIte:
         """
         # Set up logging first
         logger.set_debug(debug)
-        logger.system("term.ai.te starting...")
         
         # Initialize configuration manager
         config_path = Path(config_dir) if config_dir else None
@@ -62,10 +61,8 @@ class TermAIte:
         """
         try:
             if agentic_mode:
-                logger.system("Using agentic mode (Plan-Act-Evaluate)")
                 return self.task_handler.handle_task(prompt)
             else:
-                logger.system("Using simple response mode")
                 return self.simple_handler.handle_simple_request(prompt)
         except KeyboardInterrupt:
             logger.system("Task interrupted by user")
@@ -141,8 +138,6 @@ class TermAIte:
         Returns:
             True if task completed successfully, False otherwise
         """
-        mode_name = "agentic" if agentic_mode else "simple"
-        logger.system(f"Running single task in {mode_name} mode: {task}")
         return self.handle_task(task, agentic_mode=agentic_mode)
     
     def _setup_signal_handlers(self) -> None:

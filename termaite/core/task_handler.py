@@ -85,8 +85,6 @@ class TaskHandler:
         Returns:
             True if task completed successfully, False otherwise
         """
-        logger.user(f"Starting task: {user_prompt}")
-        
         # Initialize task state
         state = TaskState()
         task_status = TaskStatus.IN_PROGRESS
@@ -95,7 +93,6 @@ class TaskHandler:
         # Main Plan-Act-Evaluate loop
         while task_status == TaskStatus.IN_PROGRESS:
             state.iteration += 1
-            logger.system(f"Iteration: {state.iteration}")
             
             # Determine if we need a new plan
             needs_new_plan = (not state.current_plan or 
@@ -135,8 +132,6 @@ class TaskHandler:
     
     def _execute_plan_phase(self, context: str, state: TaskState) -> TaskStatus:
         """Execute the planning phase."""
-        logger.system("Entering PLAN phase.")
-        
         # Get LLM response for planning
         payload = self.payload_builder.prepare_payload("plan", context)
         if not payload:
@@ -211,8 +206,6 @@ class TaskHandler:
     
     def _execute_action_phase(self, context: str, state: TaskState) -> TaskStatus:
         """Execute the action phase."""
-        logger.system(f"Entering ACTION phase for instruction: {state.current_instruction}")
-        
         # Get LLM response for action
         payload = self.payload_builder.prepare_payload("action", context)
         if not payload:
@@ -300,10 +293,10 @@ class TaskHandler:
     
     def _handle_text_response(self, response: str, thought: str, state: TaskState) -> TaskStatus:
         """Handle a text response (question/statement) from the action agent."""
-        # Extract the actual response text (removing thought)
-        text_response = response
-        if thought:
-            text_response = text_response.replace(f"<think>{thought}</think>", "").strip()
+        import re
+        
+        # Extract the actual response text (removing all think tags)
+        text_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
         
         if not text_response:
             logger.warning("Actor: no command and no textual response/question")
@@ -326,8 +319,6 @@ class TaskHandler:
     
     def _execute_evaluation_phase(self, context: str, state: TaskState) -> tuple[TaskStatus, str]:
         """Execute the evaluation phase."""
-        logger.system("Entering EVALUATION phase.")
-        
         # Get LLM response for evaluation
         payload = self.payload_builder.prepare_payload("evaluate", context)
         if not payload:
