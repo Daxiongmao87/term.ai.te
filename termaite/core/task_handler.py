@@ -158,7 +158,8 @@ class TaskHandler:
             if self.config.get("allow_clarifying_questions", True):
                 clarification_question = decision.split(":", 1)[1].strip()
                 logger.plan_agent(f"[Planner Clarification]: {clarification_question}")
-                print(f"{CLR_GREEN}Plan Agent asks: {CLR_RESET}{CLR_BOLD_GREEN}{clarification_question}{CLR_RESET} ")
+                print(f"\n{CLR_BOLD_GREEN}{clarification_question}{CLR_RESET}")
+                print(f"{CLR_GREEN}Response: {CLR_RESET}", end="")
                 state.user_clarification = input()
                 # Return to planning with clarification
                 state.last_eval_decision = "PLANNER_CLARIFY"
@@ -306,7 +307,9 @@ class TaskHandler:
         
         if self.config.get("allow_clarifying_questions", True):
             logger.action_agent(f"[Actor Question/Statement]: {text_response}")
-            print(f"{CLR_GREEN}Action Agent says/asks: {CLR_RESET}{CLR_BOLD_GREEN}{text_response}{CLR_RESET} ")
+            # Clean output consistent with established standards
+            print(f"\n{CLR_BOLD_GREEN}{text_response}{CLR_RESET}")
+            print(f"{CLR_GREEN}Response: {CLR_RESET}", end="")
             state.user_clarification = input()
             state.last_action_taken = f"Action Agent asked/stated: {text_response}"
             state.last_action_result = f"User responded: {state.user_clarification}"
@@ -401,7 +404,8 @@ class TaskHandler:
         elif decision_type == "CLARIFY_USER":
             if self.config.get("allow_clarifying_questions", True):
                 logger.eval_agent(f"[Evaluator Clarification]: {message}")
-                print(f"{CLR_GREEN}Eval Agent asks: {CLR_RESET}{CLR_BOLD_GREEN}{message}{CLR_RESET} ")
+                print(f"\n{CLR_BOLD_GREEN}{message}{CLR_RESET}")
+                print(f"{CLR_GREEN}Response: {CLR_RESET}", end="")
                 state.user_clarification = input()
                 next_context = (
                     f"Original request: '{state.current_instruction}'.\n"

@@ -52,12 +52,13 @@ class CommandExecutor:
         """
         self.default_timeout = default_timeout
     
-    def execute(self, command: str, timeout: Optional[int] = None) -> CommandResult:
+    def execute(self, command: str, timeout: Optional[int] = None, quiet: bool = False) -> CommandResult:
         """Execute a shell command with timeout and error handling.
         
         Args:
             command: Shell command to execute
             timeout: Command timeout in seconds (uses default if None)
+            quiet: If True, suppress verbose logging
             
         Returns:
             CommandResult object with execution details
@@ -65,7 +66,8 @@ class CommandExecutor:
         if timeout is None:
             timeout = self.default_timeout
         
-        logger.system(f"Executing command: {command} - timeout: {timeout}s")
+        if not quiet:
+            logger.system(f"Executing command: {command} - timeout: {timeout}s")
         
         try:
             process = subprocess.run(
@@ -83,11 +85,12 @@ class CommandExecutor:
                 stderr=process.stderr
             )
             
-            logger.system(f"Command completed with exit code {result.exit_code}")
-            if result.output:
-                logger.system(f"Output:\n{result.output}")
-            else:
-                logger.system("(no output)")
+            if not quiet:
+                logger.system(f"Command completed with exit code {result.exit_code}")
+                if result.output:
+                    logger.system(f"Output:\n{result.output}")
+                else:
+                    logger.system("(no output)")
             
             return result
             

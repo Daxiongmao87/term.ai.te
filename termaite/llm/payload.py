@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..utils.logging import logger
 from ..utils.helpers import get_current_context, format_template_string
+from ..constants import DEFAULT_MODEL
 
 
 class PayloadBuilder:
@@ -142,24 +143,24 @@ class PayloadBuilder:
         """Process conditional blocks in prompt templates."""
         allow_cq = self.config.get("allow_clarifying_questions", True)
         
-        if "{if ALLOW_CLARIFYING_QUESTIONS}" not in prompt:
+        if "{{if ALLOW_CLARIFYING_QUESTIONS}}" not in prompt:
             return prompt
         
         if allow_cq:
             # Keep the "if" branch, remove "else" branch
             prompt = re.sub(
-                r"\{if ALLOW_CLARIFYING_QUESTIONS\}(.*?)\{else\}.*?\{end\}", 
+                r"\{\{if ALLOW_CLARIFYING_QUESTIONS\}\}(.*?)\{\{else\}\}.*?\{\{end\}\}", 
                 r"\1", prompt, flags=re.DOTALL
             )
         else:
             # Keep the "else" branch, remove "if" branch
             prompt = re.sub(
-                r"\{if ALLOW_CLARIFYING_QUESTIONS\}.*?\{else\}(.*?)\{end\}", 
+                r"\{\{if ALLOW_CLARIFYING_QUESTIONS\}\}.*?\{\{else\}\}(.*?)\{\{end\}\}", 
                 r"\1", prompt, flags=re.DOTALL
             )
         
         # Clean up remaining template markers
-        for marker in ["{if ALLOW_CLARIFYING_QUESTIONS}", "{else}", "{end}"]:
+        for marker in ["{{if ALLOW_CLARIFYING_QUESTIONS}}", "{{else}}", "{{end}}"]:
             prompt = prompt.replace(marker, "")
         
         return prompt
@@ -176,6 +177,10 @@ class PayloadBuilder:
 
             payload_data_str = payload_template.replace("<system_prompt>", escaped_system_prompt)
             payload_data_str = payload_data_str.replace("<user_prompt>", escaped_user_prompt)
+            
+            # Substitute model name from config
+            model_name = self.config.get("model", DEFAULT_MODEL)
+            payload_data_str = payload_data_str.replace("<model_name>", model_name)
             
             # Validate JSON
             json.loads(payload_data_str)

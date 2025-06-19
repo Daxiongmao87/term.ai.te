@@ -1,6 +1,7 @@
 """Main application class for termaite."""
 
 import signal
+import shutil
 import sys
 from typing import Optional
 from pathlib import Path
@@ -177,7 +178,72 @@ class TermAIte:
         logger.system("Configuration Summary:")
         for key, value in summary.items():
             logger.system(f"  {key}: {value}")
-
+    
+    def print_config_location(self) -> None:
+        """Print the configuration file locations."""
+        logger.system("Configuration File Locations:")
+        logger.system(f"  Config directory: {self.config_manager.config_dir}")
+        logger.system(f"  Config file: {self.config_manager.config_file}")
+        logger.system(f"  Payload file: {self.config_manager.payload_file}")
+        logger.system(f"  Response template: {self.config_manager.response_path_file}")
+        
+        # Check if files exist
+        files_status = []
+        for name, path in [
+            ("Config", self.config_manager.config_file),
+            ("Payload", self.config_manager.payload_file),
+            ("Response template", self.config_manager.response_path_file)
+        ]:
+            status = "✓ exists" if path.exists() else "✗ missing"
+            files_status.append(f"  {name}: {status}")
+        
+        logger.system("File Status:")
+        for status in files_status:
+            logger.system(status)
+    
+    def edit_config(self) -> None:
+        """Open the configuration file in the system's default editor."""
+        import subprocess
+        import os
+        
+        config_file = self.config_manager.config_file
+        
+        # Check if config file exists
+        if not config_file.exists():
+            logger.error(f"Configuration file not found: {config_file}")
+            logger.system("Run termaite once to generate config templates first.")
+            return
+        
+        # Determine the editor to use
+        editor = os.environ.get('EDITOR') or os.environ.get('VISUAL')
+        
+        if not editor:
+            # Try common editors as fallbacks
+            for candidate in ['nano', 'vim', 'vi', 'gedit', 'kate', 'code']:
+                if shutil.which(candidate):
+                    editor = candidate
+                    break
+        
+        if not editor:
+            logger.error("No suitable editor found.")
+            logger.error("Set the EDITOR environment variable or install nano/vim/vi.")
+            logger.system(f"Config file location: {config_file}")
+            return
+        
+        logger.system(f"Opening {config_file} with {editor}")
+        
+        try:
+            # Open the editor
+            subprocess.run([editor, str(config_file)], check=True)
+            logger.system("Config file editor closed.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Editor exited with error code {e.returncode}")
+        except FileNotFoundError:
+            logger.error(f"Editor '{editor}' not found")
+        except KeyboardInterrupt:
+            logger.system("Editor interrupted by user")
+        except Exception as e:
+            logger.error(f"Error opening editor: {e}")
 
 def create_application(config_dir: Optional[str] = None, debug: bool = False) -> TermAIte:
     """Create and initialize a TermAIte application instance.

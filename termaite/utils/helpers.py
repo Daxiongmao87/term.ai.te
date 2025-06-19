@@ -73,8 +73,29 @@ def get_current_context() -> Dict[str, str]:
 
 
 def format_template_string(template: str, **kwargs) -> str:
-    """Safely format a template string with context variables."""
+    """Safely format a template string with context variables and conditional logic."""
     try:
+        # Handle conditional blocks first (before regular format processing)
+        import re
+        
+        # Process {{{{if VARIABLE}}}} ... {{{{else}}}} ... {{{{end}}}} blocks
+        def process_conditional(match):
+            condition = match.group(1)  # The variable name
+            if_content = match.group(2)  # Content between {{{{if}}}} and {{{{else}}}}/{{{{end}}}}
+            else_content = match.group(3) if match.group(3) else ""  # Content after {{{{else}}}}
+            
+            # Check if the condition variable is true in kwargs
+            condition_value = kwargs.get(condition, False)
+            if condition_value:
+                return if_content.strip()
+            else:
+                return else_content.strip()
+        
+        # Pattern to match {{{{if VARIABLE}}}}...{{{{else}}}}...{{{{end}}}} or {{{{if VARIABLE}}}}...{{{{end}}}}
+        conditional_pattern = r'\{\{\{\{if\s+(\w+)\}\}\}\}(.*?)(?:\{\{\{\{else\}\}\}\}(.*?))?\{\{\{\{end\}\}\}\}'
+        template = re.sub(conditional_pattern, process_conditional, template, flags=re.DOTALL)
+        
+        # Now do regular template formatting
         return template.format(**kwargs)
     except KeyError as e:
         logger.error(f"Missing template variable: {e}")

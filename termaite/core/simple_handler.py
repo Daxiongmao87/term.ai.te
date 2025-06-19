@@ -122,8 +122,6 @@ class SimpleHandler:
         Returns:
             True if command executed successfully, False otherwise
         """
-        logger.system(f"Suggested command: {command}")
-        
         # Check safety and permissions
         is_safe, risk_level, warnings = self.safety_checker.check_command_safety(command)
         if not is_safe:
@@ -144,26 +142,66 @@ class SimpleHandler:
             print(f"\n{CLR_GREEN}Suggested command: {CLR_RESET}{CLR_BOLD_GREEN}{command}{CLR_RESET}")
             user_input = input(f"{CLR_GREEN}Execute this command? [y/N]: {CLR_RESET}").lower()
             if user_input != 'y':
-                logger.system("Command execution cancelled by user")
                 return True  # Not an error, user chose not to execute
         
         # Execute the command
         print(f"\n{CLR_GREEN}Executing: {CLR_RESET}{CLR_BOLD_GREEN}{command}{CLR_RESET}")
         
         try:
-            result = self.command_executor.execute(command)
+            result = self.command_executor.execute(command, quiet=True)
             
             if result.success:
-                logger.system(f"Command executed successfully (exit code: {result.exit_code})")
+                # For successful commands, just show the output
+                if result.output:
+                    print(f"\n{result.output}")
                 return True
             else:
-                logger.warning(f"Command failed with exit code: {result.exit_code}")
-                return False
+                # For failed commands, have the LLM explain the error
+                return self._handle_command_error(command, result)
                 
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
             print(f"\n{CLR_GREEN}Error executing command: {e}{CLR_RESET}")
             return False
+    
+    def _handle_command_error(self, command: str, result) -> bool:
+        """Handle command execution errors with LLM explanation.
+        
+        Args:
+            command: The command that failed
+            result: Command execution result with error info
+            
+        Returns:
+            False (command failed)
+        """
+        # Create error context for the LLM
+        error_context = f"""The command '{command}' failed with exit code {result.exit_code}.
+        
+Command output/error:
+{result.output if result.output else 'No output'}
+
+Please explain what went wrong and suggest possible solutions."""
+
+        # Get LLM explanation of the error
+        payload = self.payload_builder.prepare_payload("simple", error_context)
+        if payload:
+            response = self.llm_client.send_request(payload)
+            if response:
+                # Clean the response (remove think tags)
+                import re
+                clean_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+                
+                print(f"\n{CLR_GREEN}Command failed with exit code {result.exit_code}:{CLR_RESET}")
+                if result.output:
+                    print(f"\n{result.output}")
+                print(f"\n{CLR_BOLD_GREEN}{clean_response}{CLR_RESET}")
+                return False
+        
+        # Fallback if LLM explanation fails
+        print(f"\n{CLR_GREEN}Command failed with exit code {result.exit_code}:{CLR_RESET}")
+        if result.output:
+            print(f"\n{result.output}")
+        return False
 
 
 def create_simple_handler(config: Dict[str, Any], config_manager) -> SimpleHandler:

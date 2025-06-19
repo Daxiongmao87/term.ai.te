@@ -45,6 +45,7 @@ AGENT_DECISIONS = [
 
 # Default configuration values
 DEFAULT_ENDPOINT = "http://localhost:11434/api/generate"
+DEFAULT_MODEL = "llama3.2:latest"
 DEFAULT_COMMAND_TIMEOUT = 30
 DEFAULT_OPERATION_MODE = "normal"
 DEFAULT_ENABLE_DEBUG = False

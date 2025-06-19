@@ -70,6 +70,7 @@ class ConfigManager:
             if not self.config_file.exists():
                 context = get_current_context()
                 context["tool_instructions_addendum"] = "{tool_instructions_addendum}"
+                context["ALLOW_CLARIFYING_QUESTIONS"] = False  # Set to False to exclude CLARIFY_USER
                 
                 formatted_config = format_template_string(CONFIG_TEMPLATE, **context)
                 if safe_file_write(self.config_file, formatted_config, "config template"):
@@ -93,8 +94,13 @@ class ConfigManager:
                     return False
 
             if missing_setup_file:
-                logger.system(f"Configuration templates generated in {self.config_dir}")
+                logger.system(f"Configuration templates generated in: {self.config_dir}")
+                logger.system("Required files:")
+                logger.system(f"  • {self.config_file}")
+                logger.system(f"  • {self.payload_file}")
+                logger.system(f"  • {self.response_path_file}")
                 logger.system("Please review and configure them before running termaite again.")
+                logger.system("Run 'termaite --help' to see configuration details.")
                 return False
 
             return True
@@ -106,7 +112,9 @@ class ConfigManager:
     def _load_config(self) -> Dict[str, Any]:
         """Load and validate the configuration file."""
         if not self.config_file.exists():
-            logger.error(f"Configuration file {self.config_file} not found.")
+            logger.error(f"Configuration file not found: {self.config_file}")
+            logger.error(f"Expected config directory: {self.config_dir}")
+            logger.error("Run termaite once to generate config templates, or use --config-dir for custom location.")
             sys.exit(1)
 
         try:
@@ -124,7 +132,7 @@ class ConfigManager:
             sys.exit(1)
 
         # Validate required fields
-        required_fields = ["endpoint", "plan_prompt", "action_prompt", "evaluate_prompt", 
+        required_fields = ["endpoint", "model", "plan_prompt", "action_prompt", "evaluate_prompt", 
                           "allowed_commands", "operation_mode", "command_timeout"]
         for field in required_fields:
             if field not in config_data:

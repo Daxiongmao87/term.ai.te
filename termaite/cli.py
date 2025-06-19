@@ -13,16 +13,24 @@ from . import __version__
 
 def create_parser() -> argparse.ArgumentParser:
     """Create the command-line argument parser."""
+    from .constants import CONFIG_DIR
+    
     parser = argparse.ArgumentParser(
         description="term.ai.te: LLM-powered shell assistant with Plan-Act-Evaluate multi-agent architecture.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
   termaite "what is the best programming language"  # Simple response mode (default)
   termaite "take me to my home directory"           # Simple response with command
   termaite -a "create a backup of my documents"     # Agentic mode (multi-step)
   termaite --debug "find all large files over 100MB"
   termaite  # Interactive mode
+
+Configuration:
+  Default config directory: {CONFIG_DIR}
+  Config files: config.yaml, payload.json, response_path_template.txt
+  Use --config-dir to specify a custom location
+  Use --edit-config to open config.yaml in your default editor
 
 Operation Modes:
   Simple  - Direct LLM response with optional commands (default)
@@ -76,6 +84,18 @@ Operation Modes:
         help="Show configuration summary and exit"
     )
     
+    parser.add_argument(
+        '--config-location',
+        action='store_true',
+        help="Show configuration file locations and exit"
+    )
+    
+    parser.add_argument(
+        '--edit-config',
+        action='store_true',
+        help="Open configuration file in system default editor"
+    )
+    
     return parser
 
 
@@ -107,6 +127,16 @@ def main(args: Optional[List[str]] = None) -> None:
     # Handle config summary request
     if parsed_args.config_summary:
         app.print_config_summary()
+        return
+    
+    # Handle config location request
+    if parsed_args.config_location:
+        app.print_config_location()
+        return
+    
+    # Handle config editing request
+    if parsed_args.edit_config:
+        app.edit_config()
         return
     
     # Run in command-line or interactive mode
