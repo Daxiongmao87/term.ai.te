@@ -3,3 +3,7 @@ context.json
 payload.json
 response_path_template.txt
 .vscode
+
+# Ephemeral task files
+.iteration-notes.md
+.task-strategy.md
