@@ -1,9 +1,22 @@
-# Archive
+# Archive Directory
 
-This directory contains obsolete versions of files that are no longer actively maintained.
+This directory contains legacy and deprecated implementations of term.ai.te.
 
 ## Files
 
-- `termaite.sh` - Original bash implementation of term.ai.te. This has been superseded by the Python implementation (`termaite.py`) which provides the same functionality with better maintainability and features.
+### `termaite.sh`
+- **Date Archived**: June 18, 2025
+- **Reason**: Replaced by Python implementation for better LLM integration and cross-platform compatibility
+- **Original Purpose**: Bash-based shell assistant
+- **Status**: Obsolete, kept for reference
 
-The bash version is kept here for historical reference and in case any specific bash-only functionality needs to be referenced in the future.
+### `termaite-monolithic.py`
+- **Date Archived**: June 18, 2025  
+- **Reason**: Refactored into modular pip-installable package
+- **Original Purpose**: Monolithic 1328-line LLM-powered shell assistant
+- **Status**: Superseded by modular termaite/ package
+- **Migration**: All functionality moved to termaite/ package with improved architecture
+
+## Usage Note
+
+These files are kept for historical reference only. Use the current modular implementation in the main directory.

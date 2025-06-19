@@ -26,7 +26,13 @@ The system employs a three-agent approach:
 - Python 3.8+
 - An LLM API endpoint (e.g., Ollama running locally)
 
-### Setup
+### Quick Install (Recommended)
+
+```bash
+pip install termaite
+```
+
+### Development Install
 
 1. **Clone the repository:**
    ```bash
@@ -34,23 +40,25 @@ The system employs a three-agent approach:
    cd term.ai.te
    ```
 
-2. **Install Python dependencies:**
+2. **Install in development mode:**
    ```bash
-   pip install PyYAML requests colorama
+   pip install -e .
    ```
 
-3. **First run (generates configuration templates):**
+### First Run Setup
+
+1. **Initial run (generates configuration templates):**
    ```bash
-   python3 termaite.py
+   termaite --config-summary
    ```
 
-4. **Configure your LLM endpoint:**
+2. **Configure your LLM endpoint:**
    Edit `~/.config/term.ai.te/config.yaml` and set your LLM endpoint and other preferences.
 
-5. **Configure payload template:**
+3. **Configure payload template:**
    Edit `~/.config/term.ai.te/payload.json` to match your LLM's API format.
 
-6. **Configure response parsing:**
+4. **Configure response parsing:**
    Edit `~/.config/term.ai.te/response_path_template.txt` with the jq path to extract responses from your LLM's output.
 
 ## Usage
@@ -58,7 +66,7 @@ The system employs a three-agent approach:
 ### Interactive Mode
 
 ```bash
-python3 termaite.py
+termaite
 ```
 
 The assistant will prompt you for tasks and execute them step by step.
@@ -66,8 +74,18 @@ The assistant will prompt you for tasks and execute them step by step.
 ### Command Line Mode
 
 ```bash
-python3 termaite.py "list all python files in the current directory"
-python3 termaite.py "create a backup of my documents folder"
+termaite "list all python files in the current directory"
+termaite "create a backup of my documents folder"
+termaite --debug "find all large files over 100MB"
+```
+
+### Help and Options
+
+```bash
+termaite --help           # Show all available options
+termaite --version        # Show version information
+termaite --config-summary # Display current configuration
+termaite --debug          # Enable debug logging
 ```
 
 ### Operation Modes
