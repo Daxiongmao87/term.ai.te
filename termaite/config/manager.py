@@ -4,6 +4,11 @@ from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
 import os
 import sys
+import json
+import hashlib
+import datetime
+import tempfile
+import shutil
 
 import yaml
 
@@ -208,6 +213,11 @@ class ConfigManager:
             sys.exit(1)
     
     @property
+    def response_path(self) -> str:
+        """Get the response path for LLM parsing."""
+        return self.get_response_path()
+
+    @property
     def config(self) -> Dict[str, Any]:
         """Get the current configuration."""
         if self._config is None:
@@ -232,6 +242,63 @@ class ConfigManager:
     def is_initialized(self) -> bool:
         """Check if the configuration has been initialized."""
         return self._config is not None
+    
+    def append_context(self, user_prompt: str, llm_response: str) -> bool:
+        """Appends interaction to the context file, organized by PWD hash."""
+        context_file = self.config_dir / "context.json"
+        pwd_hash = hashlib.sha256(os.getcwd().encode('utf-8')).hexdigest()
+        timestamp_now = datetime.datetime.utcnow().isoformat() + "Z"
+        
+        # Create context entry
+        try:
+            llm_resp_json = json.loads(llm_response)
+            context_entry = {
+                "type": "success",
+                "user_prompt": user_prompt,
+                "llm_full_response": llm_resp_json,
+                "timestamp": timestamp_now
+            }
+        except json.JSONDecodeError:
+            context_entry = {
+                "type": "error",
+                "user_prompt": user_prompt,
+                "llm_error_message": llm_response,
+                "timestamp": timestamp_now
+            }
+        
+        # Load existing context
+        current_context_data = {}
+        if context_file.exists():
+            try:
+                with open(context_file, 'r') as f:
+                    current_context_data = json.load(f)
+                if not isinstance(current_context_data, dict):
+                    current_context_data = {}
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Error reading {context_file} ({e}). Initializing.")
+                current_context_data = {}
+        
+        # Add entry
+        if pwd_hash not in current_context_data:
+            current_context_data[pwd_hash] = []
+        
+        if not isinstance(current_context_data.get(pwd_hash), list):
+            current_context_data[pwd_hash] = []
+            
+        current_context_data[pwd_hash].append(context_entry)
+        
+        # Write updated context
+        try:
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=self.config_dir, suffix='.json') as tmp_f:
+                json.dump(current_context_data, tmp_f, indent=2)
+                temp_name = tmp_f.name
+            shutil.move(temp_name, str(context_file))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to write context to {context_file}: {e}")
+            if 'temp_name' in locals() and Path(temp_name).exists():
+                Path(temp_name).unlink()
+            return False
 
 
 def create_config_manager(config_dir: Optional[Path] = None) -> ConfigManager:

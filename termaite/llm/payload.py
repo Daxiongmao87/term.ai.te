@@ -108,35 +108,56 @@ class PayloadBuilder:
     
     def _get_permissive_mode_instructions(self, mode: str) -> str:
         """Get instructions for gremlin/goblin (permissive) operation modes."""
-        return (
-            f"You are operating in {mode} mode. This mode allows you to suggest any standard Linux shell command "
-            "you deem best for the current task step. You are NOT restricted to a predefined list. "
-            "Choose the most appropriate and effective command to achieve the step's goal. "
-            "Ensure the command is safe and directly relevant to the task.\\n\\n"
-        )
+        if mode == "gremlin":
+            allowed_commands_info = ""
+            if self.allowed_commands:
+                allowed_list = ", ".join(self.allowed_commands.keys())
+                allowed_commands_info = f"Pre-approved commands that will run without confirmation: {allowed_list}. "
+            
+            return (
+                f"You are operating in GREMLIN mode. {allowed_commands_info}"
+                "You can suggest ANY Linux shell command you deem necessary for the task. "
+                "Commands not on the pre-approved list will prompt the user for permission, with options to allow once, "
+                "deny, always allow (add to whitelist), or cancel the task. "
+                "Feel free to suggest the most appropriate commands without worrying about restrictions.\\n\\n"
+            )
+        elif mode == "goblin":
+            return (
+                "You are operating in GOBLIN mode - UNRESTRICTED COMMAND ACCESS. "
+                "You can suggest ANY Linux shell command and it will be executed immediately without confirmation. "
+                "This mode has NO SAFETY RESTRICTIONS. Choose commands carefully and ensure they are safe and appropriate. "
+                "You have full system access - use this power responsibly.\\n\\n"
+            )
+        else:
+            return (
+                f"You are operating in {mode} mode. This mode allows you to suggest any standard Linux shell command "
+                "you deem best for the current task step. You are NOT restricted to a predefined list. "
+                "Choose the most appropriate and effective command to achieve the step's goal. "
+                "Ensure the command is safe and directly relevant to the task.\\n\\n"
+            )
     
     def _process_conditional_blocks(self, prompt: str) -> str:
         """Process conditional blocks in prompt templates."""
         allow_cq = self.config.get("allow_clarifying_questions", True)
         
-        if "{{if ALLOW_CLARIFYING_QUESTIONS}}" not in prompt:
+        if "{if ALLOW_CLARIFYING_QUESTIONS}" not in prompt:
             return prompt
         
         if allow_cq:
             # Keep the "if" branch, remove "else" branch
             prompt = re.sub(
-                r"\\{\\{if ALLOW_CLARIFYING_QUESTIONS\\}\\}(.*?)\\{\\{else\\}\\}.*?\\{\\{end\\}\\}", 
-                r"\\1", prompt, flags=re.DOTALL
+                r"\{if ALLOW_CLARIFYING_QUESTIONS\}(.*?)\{else\}.*?\{end\}", 
+                r"\1", prompt, flags=re.DOTALL
             )
         else:
             # Keep the "else" branch, remove "if" branch
             prompt = re.sub(
-                r"\\{\\{if ALLOW_CLARIFYING_QUESTIONS\\}\\}.*?\\{\\{else\\}\\}(.*?)\\{\\{end\\}\\}", 
-                r"\\1", prompt, flags=re.DOTALL
+                r"\{if ALLOW_CLARIFYING_QUESTIONS\}.*?\{else\}(.*?)\{end\}", 
+                r"\1", prompt, flags=re.DOTALL
             )
         
         # Clean up remaining template markers
-        for marker in ["{{if ALLOW_CLARIFYING_QUESTIONS}}", "{{else}}", "{{end}}"]:
+        for marker in ["{if ALLOW_CLARIFYING_QUESTIONS}", "{else}", "{end}"]:
             prompt = prompt.replace(marker, "")
         
         return prompt

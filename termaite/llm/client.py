@@ -13,15 +13,15 @@ from .parsers import extract_response_content
 class LLMClient:
     """Handles communication with LLM APIs."""
     
-    def __init__(self, config: Dict[str, Any], response_path_file: Path):
+    def __init__(self, config: Dict[str, Any], config_manager):
         """Initialize LLM client.
         
         Args:
             config: Application configuration
-            response_path_file: Path to response path template file
+            config_manager: ConfigManager instance for response path
         """
         self.config = config
-        self.response_path_file = response_path_file
+        self.config_manager = config_manager
         self.endpoint = config.get("endpoint", "")
         self.api_key = config.get("api_key")
         self.command_timeout = config.get("command_timeout", 30)
@@ -43,9 +43,8 @@ class LLMClient:
         if not response_data:
             return None
         
-        response_path = self._get_response_path()
-        if not response_path:
-            return None
+        # Use the config manager's method to get the response path
+        response_path = self.config_manager.get_response_path()
         
         return extract_response_content(response_data, response_path)
     
@@ -111,25 +110,6 @@ class LLMClient:
         
         return cmd
     
-    def _get_response_path(self) -> Optional[str]:
-        """Get the response path from the response path file."""
-        try:
-            if not self.response_path_file.exists():
-                logger.error(f"Response path file not found: {self.response_path_file}")
-                return None
-            
-            response_path = self.response_path_file.read_text().strip()
-            if not response_path:
-                logger.error(f"Response path file is empty: {self.response_path_file}")
-                return None
-            
-            logger.debug(f"Using response path: {response_path}")
-            return response_path
-            
-        except Exception as e:
-            logger.error(f"Error reading response path file {self.response_path_file}: {e}")
-            return None
-    
     def test_connection(self) -> bool:
         """Test the LLM API connection.
         
@@ -150,6 +130,6 @@ class LLMClient:
             return False
 
 
-def create_llm_client(config: Dict[str, Any], response_path_file: Path) -> LLMClient:
+def create_llm_client(config: Dict[str, Any], config_manager) -> LLMClient:
     """Create a configured LLM client instance."""
-    return LLMClient(config, response_path_file)
+    return LLMClient(config, config_manager)
