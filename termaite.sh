@@ -126,7 +126,7 @@ done
 # *   Do NOT provide any explanations or text outside of this \`\`\`agent_command ... \`\`\` block when issuing a command.
 
 # --- Configuration Variables ---
-CONFIG_DIR="$HOME/.config/agent-shelly" # Changed to use local ./config directory
+CONFIG_DIR="$HOME/.config/term.ai.te" # Changed to use local ./config directory
 
 log_message Debug "Preparing to set CONFIG_FILE. CONFIG_DIR='${CONFIG_DIR}'"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"

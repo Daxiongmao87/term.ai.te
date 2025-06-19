@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# agent_shelly.py
+# term.ai.te
 # Python port of the agentic bash script.
 
 # --- Standard Library Imports ---
@@ -48,7 +48,7 @@ CLR_BOLD_WHITE = Style.BRIGHT + Fore.WHITE
 
 # --- Global Configuration Variables ---
 SCRIPT_NAME = Path(__file__).name
-CONFIG_DIR = Path.home() / ".config" / "agent-shelly"
+CONFIG_DIR = Path.home() / ".config" / "term.ai.te"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 PAYLOAD_FILE = CONFIG_DIR / "payload.json"
 RESPONSE_PATH_FILE = CONFIG_DIR / "response_path_template.txt"
@@ -1281,7 +1281,7 @@ def main():
     colorama_init(autoreset=True)
     signal.signal(signal.SIGINT, signal_handler)
 
-    log_message("System", f"Agent Shelly - Python Edition ({SCRIPT_NAME}) starting...")
+    log_message("System", f"term.ai.te - Python Edition ({SCRIPT_NAME}) starting...")
     log_message("Debug", f"CONFIG_DIR: {CONFIG_DIR}")
 
     check_dependencies() 
@@ -1300,7 +1300,7 @@ def main():
     log_message("System", f"Operation Mode: {config.get('operation_mode', 'normal')}")
     log_message("System", f"Command Timeout: {config.get('command_timeout', 30)}s")
 
-    parser = argparse.ArgumentParser(description="Agent Shelly - Python Edition: LLM-powered shell assistant.")
+    parser = argparse.ArgumentParser(description="term.ai.te - Python Edition: LLM-powered shell assistant.")
     parser.add_argument('task_prompt', nargs='*', help="Initial task. If empty, enters interactive mode.")
     args = parser.parse_args()
 
